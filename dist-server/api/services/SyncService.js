@@ -1,0 +1,511 @@
+import { Client } from 'basic-ftp';
+import * as chokidar from 'chokidar';
+import path from 'path';
+import fs from 'fs-extra';
+import { decrypt } from '../utils/encryption.js';
+import { getDb } from '../db.js';
+import { logStore } from './LogStore.js';
+class SyncSession {
+    client;
+    watcher = null;
+    intervalTimer = null;
+    isSyncing = false;
+    logs = [];
+    pendingDownloads;
+    // Upload queue for realtime processing
+    uploadQueue = [];
+    isProcessingQueue = false;
+    // Connection pool for parallel uploads
+    POOL_SIZE = 3; // 3 parallel connections
+    connectionPool = [];
+    poolConnected = [];
+    poolBusy = []; // Track if connection is currently in use
+    activeUploads = 0;
+    // Delete queue
+    deleteQueue = new Set();
+    isProcessingDeletes = false;
+    // Persistent connection for non-parallel ops
+    isConnected = false;
+    connectionId;
+    config;
+    localRoot;
+    constructor(connectionId, config) {
+        this.connectionId = connectionId;
+        this.config = config;
+        this.client = new Client(60000);
+        this.pendingDownloads = new Set();
+        // Initialize connection pool
+        for (let i = 0; i < this.POOL_SIZE; i++) {
+            this.connectionPool.push(new Client(30000));
+            this.poolConnected.push(false);
+            this.poolBusy.push(false); // Not busy initially
+        }
+        if (this.config.local_path && this.config.local_path.trim() !== '') {
+            this.localRoot = this.config.local_path;
+        }
+        else {
+            this.localRoot = path.resolve(process.cwd(), 'sync_data', this.connectionId.toString());
+        }
+    }
+    // Connect a pool client
+    async connectPoolClient(index) {
+        if (this.poolConnected[index] && !this.connectionPool[index].closed) {
+            return;
+        }
+        const password = decrypt(this.config.password_hash);
+        if (!password)
+            throw new Error('Cannot decrypt password');
+        await this.connectionPool[index].access({
+            host: this.config.server,
+            user: this.config.username,
+            password: password,
+            port: this.config.port || 21,
+            secure: this.config.secure ? true : false,
+            secureOptions: this.config.secure ? { rejectUnauthorized: false } : undefined
+        });
+        this.poolConnected[index] = true;
+    }
+    // Add file to queue and start parallel processing
+    queueFileForUpload(localPath) {
+        this.uploadQueue.push(localPath);
+        this.log('info', `Queued: ${path.basename(localPath)} (${this.uploadQueue.length} pending)`);
+        // Start processing if not already at max capacity
+        this.processUploadQueue();
+    }
+    // Process queue with parallel connections
+    async processUploadQueue() {
+        // Don't process if queue is empty
+        if (this.uploadQueue.length === 0)
+            return;
+        // Find an available (not busy) connection
+        let clientIndex = -1;
+        for (let i = 0; i < this.POOL_SIZE; i++) {
+            if (!this.poolBusy[i]) {
+                clientIndex = i;
+                break;
+            }
+        }
+        // All connections are busy, wait for one to become free
+        if (clientIndex === -1)
+            return;
+        // Mark this connection as busy immediately
+        this.poolBusy[clientIndex] = true;
+        // Connect if not already connected
+        if (!this.poolConnected[clientIndex] || this.connectionPool[clientIndex].closed) {
+            try {
+                await this.connectPoolClient(clientIndex);
+                this.log('success', `Pool connection ${clientIndex + 1} connected`);
+            }
+            catch (err) {
+                this.log('error', `Pool connection ${clientIndex + 1} failed: ${err.message}`);
+                this.poolBusy[clientIndex] = false;
+                return;
+            }
+        }
+        // Get next file from queue
+        const localPath = this.uploadQueue.shift();
+        if (!localPath) {
+            this.poolBusy[clientIndex] = false;
+            return;
+        }
+        // Upload in background
+        this.uploadWithPoolClient(clientIndex, localPath).finally(() => {
+            this.poolBusy[clientIndex] = false;
+            // Process more files if available
+            this.processUploadQueue();
+        });
+        // Try to start more parallel uploads on other connections
+        this.processUploadQueue();
+    }
+    // Upload a single file using pool client
+    async uploadWithPoolClient(clientIndex, localPath) {
+        const client = this.connectionPool[clientIndex];
+        try {
+            if (!fs.existsSync(localPath)) {
+                this.log('error', `File not found: ${path.basename(localPath)}`);
+                return;
+            }
+            const remotePath = this.toRemotePath(localPath, this.localRoot);
+            const remoteDir = path.posix.dirname(remotePath);
+            await client.ensureDir(remoteDir);
+            await client.uploadFrom(localPath, remotePath);
+            this.log('success', `Uploaded: ${path.basename(localPath)}`);
+        }
+        catch (err) {
+            this.log('error', `Failed: ${path.basename(localPath)} - ${err.message}`);
+            // Mark connection as disconnected for reconnection
+            if (err.message.includes('closed') || err.message.includes('FIN')) {
+                this.poolConnected[clientIndex] = false;
+            }
+        }
+    }
+    // Upload a single file (used by batch processor)
+    async uploadSingleFile(localPath) {
+        if (!fs.existsSync(localPath)) {
+            throw new Error('File not found');
+        }
+        const remotePath = this.toRemotePath(localPath, this.localRoot);
+        const remoteDir = path.posix.dirname(remotePath);
+        await this.client.ensureDir(remoteDir);
+        await this.client.uploadFrom(localPath, remotePath);
+        // Record stats
+        try {
+            const stats = await fs.stat(localPath);
+            await this.recordTransfer(stats.size, 'upload');
+        }
+        catch { }
+        this.log('success', `Uploaded: ${path.basename(localPath)}`);
+    }
+    // Ensure persistent connection is established
+    async ensureConnection() {
+        if (this.isConnected && !this.client.closed) {
+            return; // Already connected
+        }
+        // Close old connection if any
+        try {
+            if (!this.client.closed) {
+                this.client.close();
+            }
+        }
+        catch { }
+        // Create fresh client
+        this.client = new Client(60000);
+        const password = decrypt(this.config.password_hash);
+        if (!password)
+            throw new Error('Cannot decrypt password');
+        this.log('info', `Connecting to ${this.config.server}...`);
+        await this.client.access({
+            host: this.config.server,
+            user: this.config.username,
+            password: password,
+            port: this.config.port || 21,
+            secure: this.config.secure ? true : false,
+            secureOptions: this.config.secure ? { rejectUnauthorized: false } : undefined
+        });
+        this.isConnected = true;
+        this.log('success', 'Connected to FTP server');
+    }
+    async log(type, message) {
+        const logEntry = {
+            timestamp: new Date().toISOString(),
+            type,
+            message
+        };
+        this.logs.unshift(logEntry);
+        if (this.logs.length > 50)
+            this.logs.pop();
+        console.log(`[Sync-${this.connectionId}] ${type.toUpperCase()}: ${message}`);
+        // Persist to file-based LogStore (fire and forget)
+        try {
+            logStore.addLog(this.connectionId, type, message);
+        }
+        catch (e) {
+            console.error('Failed to save log to LogStore', e);
+        }
+    }
+    async recordTransfer(bytes, direction) {
+        try {
+            logStore.addTransferStat(this.connectionId, bytes, direction);
+        }
+        catch (e) {
+            console.error('Failed to save transfer stats', e);
+        }
+    }
+    getLogs() {
+        return this.logs;
+    }
+    async start() {
+        const mode = this.config.sync_mode || 'bi_directional';
+        this.log('info', `Starting sync session (Mode: ${mode})...`);
+        await fs.ensureDir(this.localRoot);
+        this.log('info', `Local directory: ${this.localRoot}`);
+        // 1. Setup Watcher (Local -> Remote)
+        // Only for bi_directional OR upload_only
+        if (mode === 'bi_directional' || mode === 'upload_only') {
+            this.watcher = chokidar.watch(this.localRoot, {
+                ignored: /(^|[\/\\])\../,
+                persistent: true,
+                ignoreInitial: true,
+                usePolling: true, // Enable polling for reliable detection on Windows
+                interval: 300,
+                binaryInterval: 500,
+                awaitWriteFinish: { stabilityThreshold: 300, pollInterval: 100 }
+            });
+            this.watcher
+                .on('add', p => this.handleLocalChange(p, this.localRoot))
+                .on('change', p => this.handleLocalChange(p, this.localRoot))
+                .on('unlink', p => this.handleLocalDelete(p, this.localRoot));
+            this.log('success', 'Local watcher started');
+        }
+        // 2. Initial Sync & Interval (Remote -> Local)
+        if (mode === 'bi_directional') {
+            this.runSyncCycle(this.localRoot);
+            this.intervalTimer = setInterval(() => this.runSyncCycle(this.localRoot), 60000);
+            this.log('success', 'Bi-directional polling started');
+        }
+        else if (mode === 'download_only') {
+            this.log('success', 'Download-only started (One-time scan)');
+            // Run once then disconnect
+            this.runSyncCycle(this.localRoot).then(() => {
+                this.log('success', 'All downloads finished. Connection closed.');
+                this.client.close();
+            }).catch(err => {
+                this.log('error', `Download process failed: ${err.message}`);
+                this.client.close();
+            });
+        }
+    }
+    async stop() {
+        this.log('info', 'Stopping sync session...');
+        if (this.watcher) {
+            await this.watcher.close();
+            this.watcher = null;
+        }
+        if (this.intervalTimer) {
+            clearInterval(this.intervalTimer);
+            this.intervalTimer = null;
+        }
+        try {
+            if (!this.client.closed) {
+                this.client.close();
+            }
+        }
+        catch (e) {
+            // Ignore
+        }
+        this.log('info', 'Sync session stopped');
+    }
+    toRemotePath(localPath, localRoot) {
+        const relative = path.relative(localRoot, localPath);
+        const remoteRoot = this.config.target_directory || '/';
+        return path.posix.join(remoteRoot, relative.split(path.sep).join('/'));
+    }
+    async manualUpload(localFilename) {
+        try {
+            const localPath = path.join(this.localRoot, localFilename);
+            if (!fs.existsSync(localPath))
+                throw new Error(`Local file not found: ${localPath}`);
+            await this.ensureConnection();
+            const remotePath = this.toRemotePath(localPath, this.localRoot);
+            const remoteDir = path.posix.dirname(remotePath);
+            await this.client.ensureDir(remoteDir);
+            await this.client.uploadFrom(localPath, remotePath);
+            try {
+                const stats = fs.statSync(localPath);
+                await this.recordTransfer(stats.size, 'upload');
+            }
+            catch { }
+            this.log('success', `Manual Upload: ${localFilename}`);
+        }
+        catch (err) {
+            this.isConnected = false;
+            this.log('error', `Manual upload failed: ${err.message}`);
+        }
+    }
+    async manualDownload(remoteFilePath) {
+        try {
+            const remoteRoot = this.config.target_directory || '/';
+            let relPath = path.posix.relative(remoteRoot, remoteFilePath);
+            if (relPath.startsWith('..')) {
+                relPath = path.basename(remoteFilePath);
+            }
+            const localPath = path.join(this.localRoot, relPath.split('/').join(path.sep));
+            await this.ensureConnection();
+            await fs.ensureDir(path.dirname(localPath));
+            await this.client.downloadTo(localPath, remoteFilePath);
+            this.log('success', `Manual Download: ${path.basename(remoteFilePath)}`);
+            try {
+                const stats = fs.statSync(localPath);
+                await this.recordTransfer(stats.size, 'download');
+            }
+            catch { }
+        }
+        catch (err) {
+            this.isConnected = false;
+            this.log('error', `Manual download failed: ${err.message}`);
+        }
+    }
+    handleLocalChange(localPath, localRoot) {
+        // Simply add file to batch queue - it will be uploaded with other files
+        this.queueFileForUpload(localPath);
+    }
+    // Queue file for deletion - process immediately (realtime mode)
+    queueFileForDelete(localPath, localRoot) {
+        if (!this.config.sync_deletions)
+            return;
+        this.deleteQueue.add(JSON.stringify({ localPath, localRoot }));
+        this.log('info', `Queued delete: ${path.basename(localPath)} (${this.deleteQueue.size} pending)`);
+        // Start processing immediately if not already processing
+        if (!this.isProcessingDeletes) {
+            this.processDeleteQueue();
+        }
+    }
+    // Process all queued deletes sequentially
+    async processDeleteQueue() {
+        if (this.isProcessingDeletes || this.deleteQueue.size === 0)
+            return;
+        this.isProcessingDeletes = true;
+        const itemsToDelete = Array.from(this.deleteQueue);
+        this.deleteQueue.clear();
+        this.log('info', `Starting batch delete of ${itemsToDelete.length} files...`);
+        try {
+            await this.ensureConnection();
+            let successCount = 0;
+            let failCount = 0;
+            for (const item of itemsToDelete) {
+                try {
+                    const { localPath, localRoot } = JSON.parse(item);
+                    const remotePath = this.toRemotePath(localPath, localRoot);
+                    await this.client.remove(remotePath);
+                    this.log('success', `Deleted: ${path.basename(localPath)}`);
+                    successCount++;
+                }
+                catch (err) {
+                    if (err.code !== 550 && !err.message.includes('No such file')) {
+                        failCount++;
+                        this.log('error', `Delete failed: ${err.message}`);
+                    }
+                }
+            }
+            this.log('success', `Batch delete complete: ${successCount} deleted, ${failCount} failed`);
+        }
+        catch (err) {
+            this.log('error', `Batch delete failed: ${err.message}`);
+        }
+        this.isProcessingDeletes = false;
+    }
+    handleLocalDelete(localPath, localRoot) {
+        this.queueFileForDelete(localPath, localRoot);
+    }
+    handleLocalDeleteDir(localPath, localRoot) {
+        // For now, skip directory deletes as they're complex and can conflict
+        if (!this.config.sync_deletions)
+            return;
+        this.log('info', `Directory delete detected (skipped): ${path.basename(localPath)}`);
+    }
+    async runSyncCycle(localRoot) {
+        if (this.isSyncing)
+            return;
+        this.isSyncing = true;
+        this.log('info', 'Starting periodic sync scan...');
+        try {
+            await this.ensureConnection();
+            const remoteRoot = this.config.target_directory || '/';
+            const remoteFiles = await this.listRemoteFiles(remoteRoot);
+            let downloadCount = 0;
+            for (const file of remoteFiles) {
+                const relPath = path.posix.relative(remoteRoot, file.path);
+                const localPath = path.join(localRoot, relPath.split('/').join(path.sep));
+                let shouldDownload = false;
+                if (!fs.existsSync(localPath)) {
+                    shouldDownload = true;
+                }
+                else {
+                    const localStats = fs.statSync(localPath);
+                    const remoteTime = new Date(file.modifiedAt || 0).getTime();
+                    const localTime = localStats.mtime.getTime();
+                    if (remoteTime > localTime + 2000) {
+                        shouldDownload = true;
+                    }
+                }
+                if (shouldDownload) {
+                    this.log('info', `Downloading: ${file.name}`);
+                    await fs.ensureDir(path.dirname(localPath));
+                    // Mark as pending download so watcher ignores it
+                    this.pendingDownloads.add(localPath);
+                    try {
+                        await this.client.downloadTo(localPath, file.path);
+                        downloadCount++;
+                        this.recordTransfer(file.size, 'download');
+                        this.log('success', `Downloaded: ${file.name}`);
+                    }
+                    catch (err) {
+                        this.pendingDownloads.delete(localPath); // Failed, so remove from ignore list
+                        throw err;
+                    }
+                    // Safety cleanup: remove from Set after 5 seconds just in case watcher didn't fire
+                    setTimeout(() => this.pendingDownloads.delete(localPath), 5000);
+                }
+            }
+            if (downloadCount === 0) {
+                this.log('info', 'Sync scan complete. No new files.');
+            }
+            else {
+                this.log('success', `Sync scan complete. Downloaded ${downloadCount} files.`);
+            }
+        }
+        catch (err) {
+            this.log('error', `Sync scan error: ${err.message}`);
+        }
+        finally {
+            this.isSyncing = false;
+        }
+    }
+    async listRemoteFiles(dir) {
+        let files = [];
+        try {
+            const list = await this.client.list(dir);
+            for (const item of list) {
+                const itemPath = path.posix.join(dir, item.name);
+                if (item.isDirectory) {
+                    const subFiles = await this.listRemoteFiles(itemPath);
+                    files = files.concat(subFiles);
+                }
+                else {
+                    files.push({
+                        name: item.name,
+                        path: itemPath,
+                        size: item.size,
+                        modifiedAt: item.modifiedAt
+                    });
+                }
+            }
+        }
+        catch (err) {
+            this.log('error', `List failed for ${dir}: ${err.message}`);
+            // ignore
+        }
+        return files;
+    }
+}
+class SyncManager {
+    sessions = new Map();
+    async getSession(connectionId) {
+        if (this.sessions.has(connectionId)) {
+            return this.sessions.get(connectionId);
+        }
+        const db = await getDb();
+        const config = await db.get('SELECT * FROM ftp_connections WHERE id = ?', connectionId);
+        if (!config)
+            throw new Error('Connection not found');
+        const session = new SyncSession(connectionId, config);
+        this.sessions.set(connectionId, session);
+        return session;
+    }
+    async startSync(connectionId) {
+        const session = await this.getSession(connectionId);
+        await session.start();
+    }
+    async stopSync(connectionId) {
+        const session = this.sessions.get(connectionId);
+        if (session) {
+            await session.stop();
+            this.sessions.delete(connectionId);
+        }
+    }
+    async manualUpload(connectionId, filename) {
+        const session = await this.getSession(connectionId);
+        await session.manualUpload(filename);
+    }
+    async manualDownload(connectionId, remotePath) {
+        const session = await this.getSession(connectionId);
+        await session.manualDownload(remotePath);
+    }
+    getStatus(connectionId) {
+        return {
+            running: this.sessions.has(connectionId),
+            logs: this.sessions.get(connectionId)?.getLogs() || []
+        };
+    }
+}
+export default new SyncManager();
