@@ -224,9 +224,10 @@ class SyncSession {
 
       await client.ensureDir(remoteDir);
 
-      // Use stream with large buffer (4MB) for maximum throughput
+      // Use stream with configurable buffer for maximum throughput
+      const bufferSizeMB = this.config.buffer_size || 16;
       const readStream = fs.createReadStream(localPath, {
-        highWaterMark: 4 * 1024 * 1024 // 4MB buffer for maximum throughput
+        highWaterMark: bufferSizeMB * 1024 * 1024 // Buffer size in MB from config
       });
       await client.uploadFrom(readStream, remotePath);
 
@@ -270,9 +271,10 @@ class SyncSession {
 
     await this.client.ensureDir(remoteDir);
 
-    // Use stream with large buffer (4MB) for maximum throughput
+    // Use stream with configurable buffer for maximum throughput
+    const bufferSizeMB = this.config.buffer_size || 16;
     const readStream = fs.createReadStream(localPath, {
-      highWaterMark: 4 * 1024 * 1024 // 4MB buffer
+      highWaterMark: bufferSizeMB * 1024 * 1024 // Buffer size in MB from config
     });
     await this.client.uploadFrom(readStream, remotePath);
 

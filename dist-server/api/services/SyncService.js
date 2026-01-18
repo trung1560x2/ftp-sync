@@ -172,9 +172,10 @@ class SyncSession {
             const remotePath = this.toRemotePath(localPath, this.localRoot);
             const remoteDir = path.posix.dirname(remotePath);
             await client.ensureDir(remoteDir);
-            // Use stream with large buffer (4MB) for maximum throughput
+            // Use stream with configurable buffer for maximum throughput
+            const bufferSizeMB = this.config.buffer_size || 16;
             const readStream = fs.createReadStream(localPath, {
-                highWaterMark: 4 * 1024 * 1024 // 4MB buffer for maximum throughput
+                highWaterMark: bufferSizeMB * 1024 * 1024 // Buffer size in MB from config
             });
             await client.uploadFrom(readStream, remotePath);
             // Stop progress tracking and record stats
@@ -211,9 +212,10 @@ class SyncSession {
         const remotePath = this.toRemotePath(localPath, this.localRoot);
         const remoteDir = path.posix.dirname(remotePath);
         await this.client.ensureDir(remoteDir);
-        // Use stream with large buffer (4MB) for maximum throughput
+        // Use stream with configurable buffer for maximum throughput
+        const bufferSizeMB = this.config.buffer_size || 16;
         const readStream = fs.createReadStream(localPath, {
-            highWaterMark: 4 * 1024 * 1024 // 4MB buffer
+            highWaterMark: bufferSizeMB * 1024 * 1024 // Buffer size in MB from config
         });
         await this.client.uploadFrom(readStream, remotePath);
         // Record stats

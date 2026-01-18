@@ -11,7 +11,7 @@ const router = Router();
 router.get('/', async (req: Request, res: Response) => {
   try {
     const db = await getDb();
-    const connections = await db.all('SELECT id, server, port, username, target_directory, local_path, sync_mode, secure, sync_deletions, parallel_connections, created_at FROM ftp_connections ORDER BY created_at DESC');
+    const connections = await db.all('SELECT id, server, port, username, target_directory, local_path, sync_mode, secure, sync_deletions, parallel_connections, buffer_size, created_at FROM ftp_connections ORDER BY created_at DESC');
     res.json(connections);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -38,7 +38,7 @@ router.post('/check-path', async (req: Request, res: Response) => {
 
 // Create new connection
 router.post('/', async (req: Request, res: Response) => {
-  const { server, port, username, password, targetDirectory, localPath, syncMode, secure, syncDeletions, parallelConnections } = req.body;
+  const { server, port, username, password, targetDirectory, localPath, syncMode, secure, syncDeletions, parallelConnections, bufferSize } = req.body;
 
   if (!server || !username || !password) {
     return res.status(400).json({ error: 'Server, username and password are required' });
@@ -49,8 +49,8 @@ router.post('/', async (req: Request, res: Response) => {
     const passwordEncrypted = encrypt(password);
 
     const result = await db.run(
-      `INSERT INTO ftp_connections (server, port, username, password_hash, target_directory, local_path, sync_mode, secure, sync_deletions, parallel_connections) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO ftp_connections (server, port, username, password_hash, target_directory, local_path, sync_mode, secure, sync_deletions, parallel_connections, buffer_size) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         server,
         port || 21,
@@ -61,7 +61,8 @@ router.post('/', async (req: Request, res: Response) => {
         syncMode || 'bi_directional',
         secure ? 1 : 0,
         syncDeletions ? 1 : 0,
-        Math.max(1, Math.min(10, parallelConnections || 3))
+        Math.max(1, Math.min(10, parallelConnections || 3)),
+        bufferSize || 16
       ]
     );
 
@@ -75,7 +76,8 @@ router.post('/', async (req: Request, res: Response) => {
       syncMode,
       secure: !!secure,
       syncDeletions: !!syncDeletions,
-      parallelConnections: Math.max(1, Math.min(10, parallelConnections || 3))
+      parallelConnections: Math.max(1, Math.min(10, parallelConnections || 3)),
+      bufferSize: bufferSize || 16
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -86,7 +88,7 @@ router.post('/', async (req: Request, res: Response) => {
 router.put('/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
   console.log('PUT /ftp-connections/:id body:', req.body);
-  const { server, port, username, password, targetDirectory, localPath, syncMode, secure, syncDeletions, parallelConnections } = req.body;
+  const { server, port, username, password, targetDirectory, localPath, syncMode, secure, syncDeletions, parallelConnections, bufferSize } = req.body;
 
   try {
     const db = await getDb();
@@ -103,7 +105,7 @@ router.put('/:id', async (req: Request, res: Response) => {
 
     await db.run(
       `UPDATE ftp_connections 
-       SET server = ?, port = ?, username = ?, password_hash = ?, target_directory = ?, local_path = ?, sync_mode = ?, secure = ?, sync_deletions = ?, parallel_connections = ?, updated_at = CURRENT_TIMESTAMP 
+       SET server = ?, port = ?, username = ?, password_hash = ?, target_directory = ?, local_path = ?, sync_mode = ?, secure = ?, sync_deletions = ?, parallel_connections = ?, buffer_size = ?, updated_at = CURRENT_TIMESTAMP 
        WHERE id = ?`,
       [
         server || existing.server,
@@ -116,6 +118,7 @@ router.put('/:id', async (req: Request, res: Response) => {
         secure !== undefined ? (secure ? 1 : 0) : existing.secure,
         syncDeletions !== undefined ? (syncDeletions ? 1 : 0) : existing.sync_deletions,
         parallelConnections !== undefined ? Math.max(1, Math.min(10, parallelConnections)) : (existing.parallel_connections || 3),
+        bufferSize !== undefined ? bufferSize : (existing.buffer_size || 16),
         id
       ]
     );

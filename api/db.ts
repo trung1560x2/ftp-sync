@@ -83,6 +83,10 @@ export const initDb = async () => {
     await db.exec("ALTER TABLE ftp_connections ADD COLUMN parallel_connections INTEGER DEFAULT 3");
   } catch (e) { /* ignore if exists */ }
 
+  try {
+    await db.exec("ALTER TABLE ftp_connections ADD COLUMN buffer_size INTEGER DEFAULT 16");
+  } catch (e) { /* ignore if exists */ }
+
   console.log('Database initialized successfully');
   return db;
 };

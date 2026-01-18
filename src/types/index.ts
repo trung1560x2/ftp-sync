@@ -9,6 +9,7 @@ export interface FTPConnection {
   secure?: boolean;
   sync_deletions?: boolean;
   parallel_connections?: number;
+  buffer_size?: number;
   created_at: string;
 }
 
@@ -23,4 +24,5 @@ export interface FTPConnectionFormData {
   secure: boolean;
   syncDeletions: boolean;
   parallelConnections: number;
+  bufferSize: number;
 }

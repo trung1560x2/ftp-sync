@@ -20,7 +20,8 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
     syncMode: 'bi_directional',
     secure: false,
     syncDeletions: false,
-    parallelConnections: 3
+    parallelConnections: 3,
+    bufferSize: 16
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -48,7 +49,8 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
         syncMode: initialData.sync_mode || 'bi_directional',
         secure: !!initialData.secure,
         syncDeletions: (initialData.sync_deletions as any) === true || (initialData.sync_deletions as any) === 1 || String(initialData.sync_deletions) === '1' || String(initialData.sync_deletions) === 'true',
-        parallelConnections: initialData.parallel_connections || 3
+        parallelConnections: initialData.parallel_connections || 3,
+        bufferSize: initialData.buffer_size || 16
       });
       // If editing and localPath exists, assume valid initially or recheck
       if (initialData.local_path) {
@@ -73,6 +75,9 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
     else if (name === 'parallelConnections') {
       const numVal = Math.max(1, Math.min(10, parseInt(value) || 3));
       setFormData(prev => ({ ...prev, [name]: numVal }));
+    }
+    else if (name === 'bufferSize') {
+      setFormData(prev => ({ ...prev, [name]: parseInt(value) || 16 }));
     }
     // Default
     else {
@@ -342,6 +347,31 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
                 />
                 <p className="text-xs text-gray-500 mt-1">
                   Số lượng FTP connections song song khi upload. Giá trị cao tăng tốc độ nhưng có thể gây quá tải server.
+                </p>
+              </div>
+
+              <div className="mt-4">
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Buffer Size
+                  <span className="ml-1 text-xs font-normal text-gray-400">
+                    (MB)
+                  </span>
+                </label>
+                <select
+                  name="bufferSize"
+                  value={formData.bufferSize}
+                  onChange={handleChange}
+                  className="w-32 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value={4}>4 MB</option>
+                  <option value={8}>8 MB</option>
+                  <option value={16}>16 MB</option>
+                  <option value={32}>32 MB</option>
+                  <option value={64}>64 MB</option>
+                  <option value={128}>128 MB</option>
+                </select>
+                <p className="text-xs text-gray-500 mt-1">
+                  Buffer lớn hơn = tốc độ cao hơn, nhưng sử dụng nhiều RAM hơn.
                 </p>
               </div>
             </div>
