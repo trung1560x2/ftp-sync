@@ -8,7 +8,7 @@ const router = Router();
 router.get('/', async (req, res) => {
     try {
         const db = await getDb();
-        const connections = await db.all('SELECT id, server, port, username, target_directory, local_path, sync_mode, secure, sync_deletions, created_at FROM ftp_connections ORDER BY created_at DESC');
+        const connections = await db.all('SELECT id, server, port, username, target_directory, local_path, sync_mode, secure, sync_deletions, parallel_connections, created_at FROM ftp_connections ORDER BY created_at DESC');
         res.json(connections);
     }
     catch (error) {
@@ -35,15 +35,15 @@ router.post('/check-path', async (req, res) => {
 });
 // Create new connection
 router.post('/', async (req, res) => {
-    const { server, port, username, password, targetDirectory, localPath, syncMode, secure, syncDeletions } = req.body;
+    const { server, port, username, password, targetDirectory, localPath, syncMode, secure, syncDeletions, parallelConnections } = req.body;
     if (!server || !username || !password) {
         return res.status(400).json({ error: 'Server, username and password are required' });
     }
     try {
         const db = await getDb();
         const passwordEncrypted = encrypt(password);
-        const result = await db.run(`INSERT INTO ftp_connections (server, port, username, password_hash, target_directory, local_path, sync_mode, secure, sync_deletions) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+        const result = await db.run(`INSERT INTO ftp_connections (server, port, username, password_hash, target_directory, local_path, sync_mode, secure, sync_deletions, parallel_connections) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
             server,
             port || 21,
             username,
@@ -52,7 +52,8 @@ router.post('/', async (req, res) => {
             localPath || '',
             syncMode || 'bi_directional',
             secure ? 1 : 0,
-            syncDeletions ? 1 : 0
+            syncDeletions ? 1 : 0,
+            Math.max(1, Math.min(10, parallelConnections || 3))
         ]);
         res.status(201).json({
             id: result.lastID,
@@ -63,7 +64,8 @@ router.post('/', async (req, res) => {
             localPath,
             syncMode,
             secure: !!secure,
-            syncDeletions: !!syncDeletions
+            syncDeletions: !!syncDeletions,
+            parallelConnections: Math.max(1, Math.min(10, parallelConnections || 3))
         });
     }
     catch (error) {
@@ -74,7 +76,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
     const { id } = req.params;
     console.log('PUT /ftp-connections/:id body:', req.body);
-    const { server, port, username, password, targetDirectory, localPath, syncMode, secure, syncDeletions } = req.body;
+    const { server, port, username, password, targetDirectory, localPath, syncMode, secure, syncDeletions, parallelConnections } = req.body;
     try {
         const db = await getDb();
         const existing = await db.get('SELECT * FROM ftp_connections WHERE id = ?', id);
@@ -86,7 +88,7 @@ router.put('/:id', async (req, res) => {
             passwordEncrypted = encrypt(password);
         }
         await db.run(`UPDATE ftp_connections 
-       SET server = ?, port = ?, username = ?, password_hash = ?, target_directory = ?, local_path = ?, sync_mode = ?, secure = ?, sync_deletions = ?, updated_at = CURRENT_TIMESTAMP 
+       SET server = ?, port = ?, username = ?, password_hash = ?, target_directory = ?, local_path = ?, sync_mode = ?, secure = ?, sync_deletions = ?, parallel_connections = ?, updated_at = CURRENT_TIMESTAMP 
        WHERE id = ?`, [
             server || existing.server,
             port || existing.port,
@@ -97,6 +99,7 @@ router.put('/:id', async (req, res) => {
             syncMode || existing.sync_mode,
             secure !== undefined ? (secure ? 1 : 0) : existing.secure,
             syncDeletions !== undefined ? (syncDeletions ? 1 : 0) : existing.sync_deletions,
+            parallelConnections !== undefined ? Math.max(1, Math.min(10, parallelConnections)) : (existing.parallel_connections || 3),
             id
         ]);
         res.json({ message: 'Updated successfully' });

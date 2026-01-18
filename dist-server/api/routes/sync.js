@@ -26,6 +26,11 @@ router.get('/status/:id', (req, res) => {
     const status = syncManager.getStatus(parseInt(id));
     res.json(status);
 });
+router.get('/progress/:id', (req, res) => {
+    const { id } = req.params;
+    const progress = syncManager.getProgress(parseInt(id));
+    res.json(progress || { activeUploads: [], queueLength: 0, totalFilesInBatch: 0, completedFiles: 0 });
+});
 router.post('/upload-file', async (req, res) => {
     const { id, filename } = req.body;
     try {

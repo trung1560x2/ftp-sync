@@ -12,6 +12,23 @@ interface SyncLog {
   message: string;
 }
 
+interface UploadProgress {
+  filename: string;
+  totalBytes: number;
+  bytesTransferred: number;
+  percent: number;
+  speedMBps: number;
+  etaSeconds: number;
+  startTime: number;
+}
+
+interface OverallProgress {
+  activeUploads: UploadProgress[];
+  queueLength: number;
+  totalFilesInBatch: number;
+  completedFiles: number;
+}
+
 class SyncSession {
   private client: Client;
   private watcher: chokidar.FSWatcher | null = null;
@@ -24,8 +41,8 @@ class SyncSession {
   private uploadQueue: string[] = [];
   private isProcessingQueue = false;
 
-  // Connection pool for parallel uploads
-  private readonly POOL_SIZE = 3; // 3 parallel connections
+  // Connection pool for parallel uploads (dynamic based on config)
+  private poolSize: number;
   private connectionPool: Client[] = [];
   private poolConnected: boolean[] = [];
   private poolBusy: boolean[] = []; // Track if connection is currently in use
@@ -34,6 +51,11 @@ class SyncSession {
   // Delete queue
   private deleteQueue: Set<string> = new Set();
   private isProcessingDeletes = false;
+
+  // Upload progress tracking
+  private uploadProgress: Map<number, UploadProgress> = new Map();
+  private totalFilesInBatch = 0;
+  private completedFilesInBatch = 0;
 
   // Persistent connection for non-parallel ops
   private isConnected = false;
@@ -48,8 +70,11 @@ class SyncSession {
     this.client = new Client(60000);
     this.pendingDownloads = new Set();
 
+    // Dynamic pool size from config (1-10, default 3)
+    this.poolSize = Math.max(1, Math.min(10, config.parallel_connections || 3));
+
     // Initialize connection pool
-    for (let i = 0; i < this.POOL_SIZE; i++) {
+    for (let i = 0; i < this.poolSize; i++) {
       this.connectionPool.push(new Client(30000));
       this.poolConnected.push(false);
       this.poolBusy.push(false); // Not busy initially
@@ -86,6 +111,7 @@ class SyncSession {
   // Add file to queue and start parallel processing
   private queueFileForUpload(localPath: string) {
     this.uploadQueue.push(localPath);
+    this.totalFilesInBatch++;
     this.log('info', `Queued: ${path.basename(localPath)} (${this.uploadQueue.length} pending)`);
 
     // Start processing if not already at max capacity
@@ -99,7 +125,7 @@ class SyncSession {
 
     // Find an available (not busy) connection
     let clientIndex = -1;
-    for (let i = 0; i < this.POOL_SIZE; i++) {
+    for (let i = 0; i < this.poolSize; i++) {
       if (!this.poolBusy[i]) {
         clientIndex = i;
         break;
@@ -145,22 +171,86 @@ class SyncSession {
   // Upload a single file using pool client
   private async uploadWithPoolClient(clientIndex: number, localPath: string) {
     const client = this.connectionPool[clientIndex];
+    const filename = path.basename(localPath);
+    const startTime = Date.now();
 
     try {
       if (!fs.existsSync(localPath)) {
-        this.log('error', `File not found: ${path.basename(localPath)}`);
+        this.log('error', `File not found: ${filename}`);
         return;
       }
+
+      const stats = await fs.stat(localPath);
+      const totalBytes = stats.size;
+
+      // Initialize progress tracking for this connection
+      this.uploadProgress.set(clientIndex, {
+        filename,
+        totalBytes,
+        bytesTransferred: 0,
+        percent: 0,
+        speedMBps: 0,
+        etaSeconds: 0,
+        startTime
+      });
+
+      // Throttled progress tracking - update only every 200ms to reduce overhead
+      let lastProgressUpdate = 0;
+      client.trackProgress((info) => {
+        const now = Date.now();
+        if (now - lastProgressUpdate < 200) return; // Throttle updates
+        lastProgressUpdate = now;
+
+        const elapsed = (now - startTime) / 1000; // seconds
+        const speedBps = elapsed > 0 ? info.bytes / elapsed : 0;
+        const speedMBps = speedBps / (1024 * 1024);
+        const percent = totalBytes > 0 ? Math.round((info.bytes / totalBytes) * 100) : 0;
+        const remainingBytes = totalBytes - info.bytes;
+        const etaSeconds = speedBps > 0 ? Math.round(remainingBytes / speedBps) : 0;
+
+        this.uploadProgress.set(clientIndex, {
+          filename,
+          totalBytes,
+          bytesTransferred: info.bytes,
+          percent,
+          speedMBps: Math.round(speedMBps * 100) / 100,
+          etaSeconds,
+          startTime
+        });
+      });
 
       const remotePath = this.toRemotePath(localPath, this.localRoot);
       const remoteDir = path.posix.dirname(remotePath);
 
       await client.ensureDir(remoteDir);
-      await client.uploadFrom(localPath, remotePath);
 
-      this.log('success', `Uploaded: ${path.basename(localPath)}`);
+      // Use stream with large buffer (4MB) for maximum throughput
+      const readStream = fs.createReadStream(localPath, {
+        highWaterMark: 4 * 1024 * 1024 // 4MB buffer for maximum throughput
+      });
+      await client.uploadFrom(readStream, remotePath);
+
+      // Stop progress tracking and record stats
+      client.trackProgress();
+      this.uploadProgress.delete(clientIndex);
+      this.completedFilesInBatch++;
+
+      // Reset batch counters when all files are done
+      if (this.uploadQueue.length === 0 && this.uploadProgress.size === 0) {
+        this.totalFilesInBatch = 0;
+        this.completedFilesInBatch = 0;
+      }
+
+      // Record transfer stats
+      try {
+        await this.recordTransfer(totalBytes, 'upload');
+      } catch { }
+
+      this.log('success', `Uploaded: ${filename}`);
     } catch (err: any) {
-      this.log('error', `Failed: ${path.basename(localPath)} - ${err.message}`);
+      client.trackProgress(); // Stop tracking on error
+      this.uploadProgress.delete(clientIndex);
+      this.log('error', `Failed: ${filename} - ${err.message}`);
 
       // Mark connection as disconnected for reconnection
       if (err.message.includes('closed') || err.message.includes('FIN')) {
@@ -179,7 +269,12 @@ class SyncSession {
     const remoteDir = path.posix.dirname(remotePath);
 
     await this.client.ensureDir(remoteDir);
-    await this.client.uploadFrom(localPath, remotePath);
+
+    // Use stream with large buffer (4MB) for maximum throughput
+    const readStream = fs.createReadStream(localPath, {
+      highWaterMark: 4 * 1024 * 1024 // 4MB buffer
+    });
+    await this.client.uploadFrom(readStream, remotePath);
 
     // Record stats
     try {
@@ -252,6 +347,15 @@ class SyncSession {
 
   public getLogs() {
     return this.logs;
+  }
+
+  public getProgress(): OverallProgress {
+    return {
+      activeUploads: Array.from(this.uploadProgress.values()),
+      queueLength: this.uploadQueue.length,
+      totalFilesInBatch: this.totalFilesInBatch,
+      completedFiles: this.completedFilesInBatch
+    };
   }
 
 
@@ -578,6 +682,12 @@ class SyncManager {
       running: this.sessions.has(connectionId),
       logs: this.sessions.get(connectionId)?.getLogs() || []
     };
+  }
+
+  public getProgress(connectionId: number): OverallProgress | null {
+    const session = this.sessions.get(connectionId);
+    if (!session) return null;
+    return session.getProgress();
   }
 }
 
