@@ -1,0 +1,139 @@
+import ignore from 'ignore';
+import path from 'path';
+import fs from 'fs-extra';
+const FTPIGNORE_FILENAME = '.ftpignore';
+// Cache for ignore instances per connection local path
+const ignoreCache = new Map();
+/**
+ * Default patterns to ignore (similar to common .gitignore defaults)
+ * These patterns are always applied unless overridden by .ftpignore
+ */
+const DEFAULT_PATTERNS = [
+    // Version Control
+    '.git/',
+    '.svn/',
+    '.hg/',
+    // OS Files
+    '.DS_Store',
+    'Thumbs.db',
+    'desktop.ini',
+    // Dependencies
+    'node_modules/',
+    'vendor/',
+    'bower_components/',
+    // Build/Cache
+    'dist/',
+    'build/',
+    'coverage/',
+    '.cache/',
+    'storage/',
+    'bootstrap/cache/',
+    // IDE/Editor
+    '.idea/',
+    '.vscode/',
+    '*.swp',
+    '*.swo',
+    // Logs
+    '*.log',
+    'npm-debug.log*',
+];
+/**
+ * Get or create an Ignore instance for a given local root directory.
+ * The instance is cached and reloaded if the .ftpignore file changes.
+ */
+export async function getIgnoreInstance(localRoot) {
+    const ftpignorePath = path.join(localRoot, FTPIGNORE_FILENAME);
+    // Check if .ftpignore file exists
+    let currentMtime = 0;
+    try {
+        const stats = await fs.stat(ftpignorePath);
+        currentMtime = stats.mtimeMs;
+    }
+    catch {
+        // File doesn't exist, use default patterns only
+    }
+    // Check cache
+    const cached = ignoreCache.get(localRoot);
+    if (cached && cached.mtime === currentMtime) {
+        return cached.instance;
+    }
+    // Create new instance
+    const ig = ignore();
+    // Add default patterns
+    ig.add(DEFAULT_PATTERNS);
+    // Load .ftpignore if exists
+    if (currentMtime > 0) {
+        try {
+            const content = await fs.readFile(ftpignorePath, 'utf-8');
+            const lines = content
+                .split('\n')
+                .map(line => line.trim())
+                .filter(line => line && !line.startsWith('#')); // Remove empty lines and comments
+            ig.add(lines);
+        }
+        catch (err) {
+            console.error(`Failed to load .ftpignore from ${localRoot}:`, err);
+        }
+    }
+    // Cache the instance
+    ignoreCache.set(localRoot, { instance: ig, mtime: currentMtime });
+    return ig;
+}
+/**
+ * Check if a file path should be ignored.
+ * @param localRoot - The root directory being synced
+ * @param filePath - The absolute path to the file
+ * @returns true if the file should be ignored
+ */
+export async function shouldIgnore(localRoot, filePath) {
+    const ig = await getIgnoreInstance(localRoot);
+    // Get relative path from local root
+    const relativePath = path.relative(localRoot, filePath);
+    // Normalize path separators for cross-platform compatibility
+    const normalizedPath = relativePath.split(path.sep).join('/');
+    return ig.ignores(normalizedPath);
+}
+/**
+ * Read the content of .ftpignore file
+ */
+export async function readFtpIgnore(localRoot) {
+    const ftpignorePath = path.join(localRoot, FTPIGNORE_FILENAME);
+    try {
+        return await fs.readFile(ftpignorePath, 'utf-8');
+    }
+    catch {
+        // Return default template if file doesn't exist
+        return `# FTP Ignore Patterns
+# Similar to .gitignore syntax
+# Lines starting with # are comments
+
+# Example patterns:
+# *.log
+# node_modules/
+# *.tmp
+# .git/
+`;
+    }
+}
+/**
+ * Write content to .ftpignore file
+ */
+export async function writeFtpIgnore(localRoot, content) {
+    const ftpignorePath = path.join(localRoot, FTPIGNORE_FILENAME);
+    await fs.writeFile(ftpignorePath, content, 'utf-8');
+    // Clear cache to force reload
+    ignoreCache.delete(localRoot);
+}
+/**
+ * Clear cached ignore instance for a path (useful when .ftpignore changes)
+ */
+export function clearIgnoreCache(localRoot) {
+    ignoreCache.delete(localRoot);
+}
+export default {
+    getIgnoreInstance,
+    shouldIgnore,
+    readFtpIgnore,
+    writeFtpIgnore,
+    clearIgnoreCache,
+};

@@ -4,6 +4,7 @@ import { getDb } from '../db.js';
 import { encrypt, decrypt } from '../utils/encryption.js';
 import path from 'path';
 import fs from 'fs-extra';
+import { readFtpIgnore, writeFtpIgnore } from '../services/IgnoreService.js';
 
 const router = Router();
 
@@ -11,7 +12,7 @@ const router = Router();
 router.get('/', async (req: Request, res: Response) => {
   try {
     const db = await getDb();
-    const connections = await db.all('SELECT id, server, port, username, target_directory, local_path, sync_mode, secure, sync_deletions, parallel_connections, buffer_size, created_at FROM ftp_connections ORDER BY created_at DESC');
+    const connections = await db.all('SELECT id, name, server, port, username, target_directory, local_path, sync_mode, secure, sync_deletions, parallel_connections, buffer_size, exclude_paths, created_at FROM ftp_connections ORDER BY created_at DESC');
     res.json(connections);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -38,22 +39,23 @@ router.post('/check-path', async (req: Request, res: Response) => {
 
 // Create new connection
 router.post('/', async (req: Request, res: Response) => {
-  const { server, port, username, password, targetDirectory, localPath, syncMode, secure, syncDeletions, parallelConnections, bufferSize } = req.body;
+  const { name, server, port, username, password, targetDirectory, localPath, syncMode, secure, syncDeletions, parallelConnections, bufferSize, protocol, privateKey, excludePaths } = req.body;
 
-  if (!server || !username || !password) {
-    return res.status(400).json({ error: 'Server, username and password are required' });
+  if (!server || !username || (!password && !privateKey)) {
+    return res.status(400).json({ error: 'Server, username and password/key are required' });
   }
 
   try {
     const db = await getDb();
-    const passwordEncrypted = encrypt(password);
+    const passwordEncrypted = password ? encrypt(password) : '';
 
     const result = await db.run(
-      `INSERT INTO ftp_connections (server, port, username, password_hash, target_directory, local_path, sync_mode, secure, sync_deletions, parallel_connections, buffer_size) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO ftp_connections (name, server, port, username, password_hash, target_directory, local_path, sync_mode, secure, sync_deletions, parallel_connections, buffer_size, protocol, private_key, exclude_paths) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        name || null,
         server,
-        port || 21,
+        port || (protocol === 'sftp' ? 22 : 21),
         username,
         passwordEncrypted,
         targetDirectory || '/',
@@ -62,14 +64,18 @@ router.post('/', async (req: Request, res: Response) => {
         secure ? 1 : 0,
         syncDeletions ? 1 : 0,
         Math.max(1, Math.min(10, parallelConnections || 3)),
-        bufferSize || 16
+        bufferSize || 16,
+        protocol || 'ftp',
+        privateKey || null,
+        excludePaths || ''
       ]
     );
 
     res.status(201).json({
       id: result.lastID,
+      name,
       server,
-      port: port || 21,
+      port: port || (protocol === 'sftp' ? 22 : 21),
       username,
       targetDirectory: targetDirectory || '/',
       localPath,
@@ -77,7 +83,9 @@ router.post('/', async (req: Request, res: Response) => {
       secure: !!secure,
       syncDeletions: !!syncDeletions,
       parallelConnections: Math.max(1, Math.min(10, parallelConnections || 3)),
-      bufferSize: bufferSize || 16
+      bufferSize: bufferSize || 16,
+      protocol: protocol || 'ftp',
+      privateKey
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -87,8 +95,12 @@ router.post('/', async (req: Request, res: Response) => {
 // Update connection
 router.put('/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
-  console.log('PUT /ftp-connections/:id body:', req.body);
-  const { server, port, username, password, targetDirectory, localPath, syncMode, secure, syncDeletions, parallelConnections, bufferSize } = req.body;
+
+  // Create a copy of the body for logging to mask sensitive data
+  const { password: _, ...logBody } = req.body;
+  console.log('PUT /ftp-connections/:id body:', { ...logBody, password: req.body.password ? '******' : undefined });
+
+  const { name, server, port, username, password, targetDirectory, localPath, syncMode, secure, syncDeletions, parallelConnections, bufferSize, protocol, privateKey, excludePaths } = req.body;
 
   try {
     const db = await getDb();
@@ -99,15 +111,18 @@ router.put('/:id', async (req: Request, res: Response) => {
     }
 
     let passwordEncrypted = existing.password_hash;
-    if (password) {
+    // Only update password if a NEW non-empty password is provided
+    // Empty string or undefined = keep existing password (security: password is not resent)
+    if (password && password.trim() !== '') {
       passwordEncrypted = encrypt(password);
     }
 
     await db.run(
       `UPDATE ftp_connections 
-       SET server = ?, port = ?, username = ?, password_hash = ?, target_directory = ?, local_path = ?, sync_mode = ?, secure = ?, sync_deletions = ?, parallel_connections = ?, buffer_size = ?, updated_at = CURRENT_TIMESTAMP 
+       SET name = ?, server = ?, port = ?, username = ?, password_hash = ?, target_directory = ?, local_path = ?, sync_mode = ?, secure = ?, sync_deletions = ?, parallel_connections = ?, buffer_size = ?, protocol = ?, private_key = ?, exclude_paths = ?, updated_at = CURRENT_TIMESTAMP 
        WHERE id = ?`,
       [
+        name !== undefined ? name : existing.name,
         server || existing.server,
         port || existing.port,
         username || existing.username,
@@ -119,6 +134,9 @@ router.put('/:id', async (req: Request, res: Response) => {
         syncDeletions !== undefined ? (syncDeletions ? 1 : 0) : existing.sync_deletions,
         parallelConnections !== undefined ? Math.max(1, Math.min(10, parallelConnections)) : (existing.parallel_connections || 3),
         bufferSize !== undefined ? bufferSize : (existing.buffer_size || 16),
+        protocol || existing.protocol || 'ftp',
+        privateKey !== undefined ? privateKey : (existing.private_key || null),
+        excludePaths !== undefined ? excludePaths : (existing.exclude_paths || ''),
         id
       ]
     );
@@ -141,55 +159,110 @@ router.delete('/:id', async (req: Request, res: Response) => {
   }
 });
 
+import { TransferClientFactory } from '../services/transfer/TransferClientFactory.js';
+
 // Test connection
 router.post('/test', async (req: Request, res: Response) => {
-  let { server, port, username, password, id, secure } = req.body;
+  let { server, port, username, password, id, secure, protocol, privateKey } = req.body;
   let finalPassword = password;
 
-  if (id && !password) {
+  if (id && !password && !privateKey) {
     try {
       const db = await getDb();
-      const conn = await db.get('SELECT server, port, username, password_hash, secure FROM ftp_connections WHERE id = ?', id);
+      const conn = await db.get('SELECT server, port, username, password_hash, secure, protocol, private_key FROM ftp_connections WHERE id = ?', id);
       if (!conn) return res.status(404).json({ error: 'Connection not found' });
 
-      finalPassword = decrypt(conn.password_hash);
-
-      if (!finalPassword) {
-        return res.status(400).json({
-          success: false,
-          message: 'Cannot decrypt password. Please edit connection and re-enter password.'
-        });
+      if (conn.password_hash) {
+        finalPassword = decrypt(conn.password_hash);
       }
 
       if (!server) server = conn.server;
       if (!port) port = conn.port;
       if (!username) username = conn.username;
       if (secure === undefined) secure = !!conn.secure;
+      if (!protocol) protocol = conn.protocol || 'ftp';
+      if (!privateKey) privateKey = conn.private_key;
 
     } catch (err: any) {
       return res.status(500).json({ success: false, message: 'Database error: ' + err.message });
     }
   }
 
-  if (!finalPassword) {
-    return res.status(400).json({ success: false, message: 'Password is required' });
+  if (!finalPassword && !privateKey) {
+    return res.status(400).json({ success: false, message: 'Password or Private Key is required' });
   }
 
-  const client = new Client();
+  const client = TransferClientFactory.createClient(protocol || 'ftp');
   try {
-    await client.access({
+    await client.connect({
       host: server,
-      user: username,
+      username: username,
       password: finalPassword,
-      port: port || 21,
+      port: port || (protocol === 'sftp' ? 22 : 21),
       secure: secure ? true : false,
-      secureOptions: secure ? { rejectUnauthorized: false } : undefined // Allow self-signed certs for testing
+      secureOptions: secure ? { rejectUnauthorized: false } : undefined,
+      privateKey: privateKey
     });
     res.json({ success: true, message: 'Connection successful' });
   } catch (error: any) {
     res.status(200).json({ success: false, message: `Error: ${error.message}` });
   } finally {
     client.close();
+  }
+});
+
+// Get .ftpignore content for a connection
+router.get('/:id/ignore', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  try {
+    const db = await getDb();
+    const connection = await db.get('SELECT local_path FROM ftp_connections WHERE id = ?', id);
+
+    if (!connection) {
+      return res.status(404).json({ error: 'Connection not found' });
+    }
+
+    // Determine local root path
+    const localRoot = connection.local_path && connection.local_path.trim() !== ''
+      ? connection.local_path
+      : path.resolve(process.cwd(), 'sync_data', id);
+
+    const content = await readFtpIgnore(localRoot);
+    res.json({ content, localRoot });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update .ftpignore content for a connection
+router.put('/:id/ignore', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { content } = req.body;
+
+  if (content === undefined) {
+    return res.status(400).json({ error: 'Content is required' });
+  }
+
+  try {
+    const db = await getDb();
+    const connection = await db.get('SELECT local_path FROM ftp_connections WHERE id = ?', id);
+
+    if (!connection) {
+      return res.status(404).json({ error: 'Connection not found' });
+    }
+
+    // Determine local root path
+    const localRoot = connection.local_path && connection.local_path.trim() !== ''
+      ? connection.local_path
+      : path.resolve(process.cwd(), 'sync_data', id);
+
+    // Ensure directory exists
+    await fs.ensureDir(localRoot);
+
+    await writeFtpIgnore(localRoot, content);
+    res.json({ message: 'Ignore patterns updated successfully' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
   }
 });
 

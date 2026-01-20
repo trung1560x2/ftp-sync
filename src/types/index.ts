@@ -1,5 +1,6 @@
 export interface FTPConnection {
   id: number;
+  name?: string;
   server: string;
   port: number;
   username: string;
@@ -10,10 +11,15 @@ export interface FTPConnection {
   sync_deletions?: boolean;
   parallel_connections?: number;
   buffer_size?: number;
+  protocol?: 'ftp' | 'ftps' | 'sftp';
+  private_key?: string;
+  conflict_resolution?: 'overwrite' | 'newer' | 'different_size';
+  exclude_paths?: string; // Comma or newline separated patterns to exclude from sync/diff
   created_at: string;
 }
 
 export interface FTPConnectionFormData {
+  name?: string;
   server: string;
   port: number;
   username: string;
@@ -25,4 +31,9 @@ export interface FTPConnectionFormData {
   syncDeletions: boolean;
   parallelConnections: number;
   bufferSize: number;
+  protocol: 'ftp' | 'ftps' | 'sftp';
+  privateKey?: string;
+  conflictResolution: 'overwrite' | 'newer' | 'different_size';
+  excludePaths: string; // Comma or newline separated patterns to exclude
 }
+

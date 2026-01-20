@@ -17,6 +17,8 @@ import syncRoutes from './routes/sync.js'
 import fileRoutes from './routes/files.js'
 import systemRoutes from './routes/system.js'
 import reportRoutes from './routes/reports.js'
+import deploymentRoutes from './routes/deployment.js'
+import contentDiffRoutes from './routes/contentDiff.js'
 
 // for esm mode
 const __filename = fileURLToPath(import.meta.url)
@@ -44,6 +46,8 @@ app.use('/api/sync', syncRoutes)
 app.use('/api/files', fileRoutes)
 app.use('/api/system', systemRoutes)
 app.use('/api/reports', reportRoutes)
+app.use('/api/deployment', deploymentRoutes)
+app.use('/api/content-diff', contentDiffRoutes)
 
 /**
  * health

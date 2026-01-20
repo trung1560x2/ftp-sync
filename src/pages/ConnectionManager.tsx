@@ -10,6 +10,8 @@ const ConnectionManager: React.FC = () => {
   const [editingConnection, setEditingConnection] = useState<FTPConnection | undefined>(undefined);
   const [loading, setLoading] = useState(true);
 
+  const [searchQuery, setSearchQuery] = useState('');
+
   const fetchConnections = async () => {
     setLoading(true);
     try {
@@ -55,25 +57,43 @@ const ConnectionManager: React.FC = () => {
     fetchConnections();
   };
 
+  const filteredConnections = connections.filter(conn =>
+    (conn.name && conn.name.toLowerCase().includes(searchQuery.toLowerCase())) ||
+    conn.server.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    conn.username.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
   return (
     <div className="container mx-auto px-4 py-8 max-w-5xl">
-      <div className="flex justify-between items-center mb-8">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">FTP Connections</h1>
           <p className="text-gray-500 mt-1">Manage your FTP server connections</p>
         </div>
-        <button
-          onClick={handleCreate}
-          className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors shadow-sm"
-        >
-          <Plus size={20} className="mr-2" />
-          New Connection
-        </button>
+
+        <div className="flex items-center space-x-4 w-full md:w-auto">
+          <div className="relative flex-1 md:w-64">
+            <input
+              type="text"
+              placeholder="Search connections..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full pl-4 pr-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-sm"
+            />
+          </div>
+          <button
+            onClick={handleCreate}
+            className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors shadow-sm whitespace-nowrap"
+          >
+            <Plus size={20} className="mr-2" />
+            New Connection
+          </button>
+        </div>
       </div>
 
       {showForm && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="w-full max-w-2xl">
+          <div className="w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             <FTPConnectionForm
               initialData={editingConnection}
               onSuccess={handleFormSuccess}
@@ -89,7 +109,7 @@ const ConnectionManager: React.FC = () => {
         </div>
       ) : (
         <FTPConnectionList
-          connections={connections}
+          connections={filteredConnections}
           onEdit={handleEdit}
           onDelete={handleDelete}
         />

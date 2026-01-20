@@ -3,7 +3,10 @@ import { FTPConnection } from '../types';
 import { Edit2, Trash2, Wifi, Server, Folder, Play, Square, Activity, ChevronDown, ChevronUp, FileText, BarChart2 } from 'lucide-react';
 import FileManager from './FileManager';
 import StatisticsModal from './StatisticsModal';
+import VisualDiffModal from './VisualDiffModal';
 import UploadProgressBar from './UploadProgressBar';
+import { GitCompare, Rocket } from 'lucide-react';
+import DeploymentManager from './DeploymentManager';
 
 interface Props {
   connections: FTPConnection[];
@@ -37,6 +40,9 @@ const FTPConnectionList: React.FC<Props> = ({ connections, onEdit, onDelete }) =
   const [testResult, setTestResult] = useState<{ id: number; success: boolean; message: string } | null>(null);
   const [activeFileManager, setActiveFileManager] = useState<{ connectionId: number; path: string } | null>(null);
   const [activeStats, setActiveStats] = useState<{ connectionId: number; server: string } | null>(null);
+  const [activeDiff, setActiveDiff] = useState<{ connectionId: number; server: string } | null>(null);
+  const [activeDeployment, setActiveDeployment] = useState<number | null>(null);
+  const [syncPausedForDiff, setSyncPausedForDiff] = useState<number | null>(null);
 
   // Sync State
   const [syncStatuses, setSyncStatuses] = useState<Record<number, SyncStatus>>({});
@@ -184,6 +190,35 @@ const FTPConnectionList: React.FC<Props> = ({ connections, onEdit, onDelete }) =
     setExpandedLogs(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
+  const handleOpenVisualDiff = async (conn: FTPConnection) => {
+    // Check if sync is running
+    const isSyncing = syncStatuses[conn.id]?.running;
+
+    if (isSyncing) {
+      console.log(`[Auto-Switch] Pausing sync for ${conn.server} to open Visual Diff...`);
+      setSyncPausedForDiff(conn.id);
+      await toggleSync(conn.id, true); // Stop sync
+    } else {
+      setSyncPausedForDiff(null);
+    }
+
+    setActiveDiff({ connectionId: conn.id, server: conn.server });
+  };
+
+  const handleCloseVisualDiff = async () => {
+    if (activeDiff) {
+      const id = activeDiff.connectionId;
+      setActiveDiff(null); // Close modal first
+
+      // Resume if it was paused automatically
+      if (syncPausedForDiff === id) {
+        console.log(`[Auto-Switch] Resuming sync for ${id}...`);
+        await toggleSync(id, false); // Start sync
+        setSyncPausedForDiff(null);
+      }
+    }
+  };
+
   if (connections.length === 0) {
     return (
       <div className="text-center py-12 bg-gray-50 rounded-lg border border-dashed border-gray-300">
@@ -210,6 +245,19 @@ const FTPConnectionList: React.FC<Props> = ({ connections, onEdit, onDelete }) =
           serverName={connections.find(c => c.id === activeFileManager.connectionId)?.server || 'Unknown'}
         />
       )}
+      {activeDiff && (
+        <VisualDiffModal
+          onClose={handleCloseVisualDiff}
+          connectionId={activeDiff.connectionId}
+          serverName={activeDiff.server}
+        />
+      )}
+      {activeDeployment && (
+        <DeploymentManager
+          connectionId={activeDeployment}
+          onClose={() => setActiveDeployment(null)}
+        />
+      )}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-6">
         {connections.map((conn) => {
           const isSyncing = syncStatuses[conn.id]?.running || false;
@@ -226,10 +274,13 @@ const FTPConnectionList: React.FC<Props> = ({ connections, onEdit, onDelete }) =
                       <Server className={`h-6 w-6 ${isSyncing ? 'text-green-600 animate-pulse' : 'text-blue-600'}`} />
                     </div>
                     <div>
-                      <h4 className="font-bold text-gray-800 text-lg truncate max-w-[180px]" title={conn.server}>
-                        {conn.server}
+                      <h4 className="font-bold text-gray-800 text-lg truncate max-w-[180px]" title={conn.name || conn.server}>
+                        {conn.name || conn.server}
                       </h4>
-                      <p className="text-sm text-gray-500">Port: {conn.port}</p>
+                      <div className="text-sm text-gray-500 flex flex-col">
+                        {conn.name && <span className="text-xs text-gray-400 truncate w-[180px]" title={conn.server}>{conn.server}</span>}
+                        <span>Port: {conn.port}</span>
+                      </div>
                     </div>
                   </div>
                   <div className="flex space-x-2">
@@ -246,6 +297,13 @@ const FTPConnectionList: React.FC<Props> = ({ connections, onEdit, onDelete }) =
                       title="File Manager"
                     >
                       <Folder size={18} />
+                    </button>
+                    <button
+                      onClick={() => handleOpenVisualDiff(conn)}
+                      className="p-2 text-gray-400 hover:text-teal-600 hover:bg-gray-50 rounded-full transition-colors"
+                      title="Visual Diff (Compare info)"
+                    >
+                      <GitCompare size={18} />
                     </button>
                     <button
                       onClick={() => onEdit(conn)}
@@ -321,6 +379,14 @@ const FTPConnectionList: React.FC<Props> = ({ connections, onEdit, onDelete }) =
 
               {/* Actions Footer */}
               <div className="p-3 bg-gray-50 border-t border-gray-100 rounded-b-lg grid grid-cols-2 gap-3">
+                <button
+                  onClick={() => setActiveDeployment(conn.id)}
+                  className="col-span-2 flex items-center justify-center px-3 py-2 text-sm font-bold text-white bg-gradient-to-r from-purple-600 to-indigo-600 rounded-md hover:from-purple-700 hover:to-indigo-700 shadow-md transform transition-transform active:scale-95"
+                  title="Zero-Downtime Deployment & Rollback"
+                >
+                  <Rocket size={16} className="mr-2" /> Deploy & Rollback
+                </button>
+
                 <button
                   onClick={() => handleTestConnection(conn)}
                   disabled={testingId === conn.id}

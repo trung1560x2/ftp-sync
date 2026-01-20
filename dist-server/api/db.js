@@ -82,6 +82,26 @@ export const initDb = async () => {
         await db.exec("ALTER TABLE ftp_connections ADD COLUMN buffer_size INTEGER DEFAULT 16");
     }
     catch (e) { /* ignore if exists */ }
+    try {
+        await db.exec("ALTER TABLE ftp_connections ADD COLUMN protocol TEXT DEFAULT 'ftp'");
+    }
+    catch (e) { /* ignore if exists */ }
+    try {
+        await db.exec("ALTER TABLE ftp_connections ADD COLUMN private_key TEXT");
+    }
+    catch (e) { /* ignore if exists */ }
+    try {
+        await db.exec("ALTER TABLE ftp_connections ADD COLUMN name TEXT");
+    }
+    catch (e) { /* ignore if exists */ }
+    try {
+        await db.exec("ALTER TABLE ftp_connections ADD COLUMN conflict_resolution TEXT DEFAULT 'overwrite'");
+    }
+    catch (e) { /* ignore if exists */ }
+    try {
+        await db.exec("ALTER TABLE ftp_connections ADD COLUMN exclude_paths TEXT");
+    }
+    catch (e) { /* ignore if exists */ }
     console.log('Database initialized successfully');
     return db;
 };

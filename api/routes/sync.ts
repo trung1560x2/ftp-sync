@@ -23,6 +23,7 @@ router.post('/stop', async (req: Request, res: Response) => {
   }
 });
 
+
 router.get('/status/:id', (req: Request, res: Response) => {
   const { id } = req.params;
   const status = syncManager.getStatus(parseInt(id));
@@ -36,9 +37,11 @@ router.get('/progress/:id', (req: Request, res: Response) => {
 });
 
 router.post('/upload-file', async (req: Request, res: Response) => {
-  const { id, filename } = req.body;
+  const { id, filename, remoteName } = req.body;
   try {
-    await syncManager.manualUpload(id, filename);
+    // filename: local file name (e.g., 'http' on Windows)
+    // remoteName: optional, the name to use on remote server (e.g., 'Http' on Linux)
+    await syncManager.manualUpload(id, filename, remoteName);
     res.json({ success: true, message: 'File uploaded' });
   } catch (error: any) {
     res.status(500).json({ success: false, message: error.message });
@@ -50,6 +53,27 @@ router.post('/download-file', async (req: Request, res: Response) => {
   try {
     await syncManager.manualDownload(id, remotePath);
     res.json({ success: true, message: 'File downloaded' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/content-diff', async (req: Request, res: Response) => {
+  const { id, filename, remoteName } = req.body;
+  try {
+    const diffData = await syncManager.getContentDiff(id, filename, remoteName);
+    res.json({ success: true, data: diffData });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/bulk', async (req: Request, res: Response) => {
+  const { id, items, basePath } = req.body;
+  try {
+    // items: { path: string, direction: 'upload'|'download', isDirectory: boolean }[]
+    await syncManager.processBulkSync(id, items, basePath || '/');
+    res.json({ success: true, message: 'Bulk sync started' });
   } catch (error: any) {
     res.status(500).json({ success: false, message: error.message });
   }
