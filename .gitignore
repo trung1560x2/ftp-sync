@@ -41,3 +41,4 @@ config_debug.txt
 check_*.js
 debug_*.js
 
+dist-server/
