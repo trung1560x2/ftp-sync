@@ -17,6 +17,7 @@ interface SyncLog {
 }
 
 interface UploadProgress {
+  type: 'upload' | 'download';
   filename: string;
   totalBytes: number;
   bytesTransferred: number;
@@ -174,7 +175,7 @@ class SyncSession {
   }
 
   // Add file to queue
-  private async queueFileForUpload(localPath: string) {
+  private async queueFileForUpload(localPath: string): Promise<void> {
     if (await shouldIgnore(this.localRoot, localPath)) {
       this.log('info', `Ignored (upload): ${path.basename(localPath)}`);
       return;
@@ -183,19 +184,8 @@ class SyncSession {
     this.totalFilesInBatch++;
     this.log('info', `Queued: ${path.basename(localPath)}`);
 
-    // OPTIMIZATION: Debounce calls for same file (chokidar can fire multiple times)
-    // We already use P-Queue which serializes execution per file if we uniqueness-check the queue?
-    // PQueue doesn't dedup.
-    // But we can check if file is already in our progress map?
-    // OR just rely on the queue.
-
-    // Add brief delay before adding to queue to allow file writing to settle further if needed
-    // (chokidar awaitWriteFinish handles most, but a small delay helps batch log messages too)
-    // await new Promise(r => setTimeout(r, 100)); // Too slow?
-
-    // Add to p-queue
-    // Use a wrapper to catch rejected promises (though uploadFile handles errors internally)
-    this.syncQueue.add(async () => {
+    // Add to p-queue and return the promise so we can await it if needed
+    return this.syncQueue.add(async () => {
       // Double check existence before start (in case deleted while in queue)
       if (!fs.existsSync(localPath)) return;
       await this.uploadFile(localPath);
@@ -223,6 +213,7 @@ class SyncSession {
 
       // Initialize progress
       this.uploadProgress.set(taskId, {
+        type: 'upload',
         filename,
         totalBytes,
         bytesTransferred: 0,
@@ -246,6 +237,7 @@ class SyncSession {
         const remainingBytes = totalBytes - info.bytes;
 
         this.uploadProgress.set(taskId, {
+          type: 'upload',
           filename,
           totalBytes,
           bytesTransferred: info.bytes,
@@ -501,13 +493,22 @@ class SyncSession {
     // Only for bi_directional OR upload_only
     if (mode === 'bi_directional' || mode === 'upload_only') {
       this.watcher = chokidar.watch(this.localRoot, {
-        ignored: /(^|[\/\\])(\..|node_modules|vendor|storage)/, // Relaxed ignore: removed dist/build to allow syncing
+
+        ignored: [
+          /(^|[\/\\])\.git([\/\\]|$)/,
+          /(^|[\/\\])\.svn([\/\\]|$)/,
+          ...(this.config.exclude_paths || '')
+            .split(/[\n,]/)
+            .map((s: string) => s.trim())
+            .filter((s: string) => s.length > 0)
+            .map((s: string) => s.includes('*') ? s : `**/${s}/**`)
+        ],
         persistent: true,
         ignoreInitial: true,
-        usePolling: true, // Enable polling for reliable detection on Windows
-        interval: 300,
-        binaryInterval: 500,
-        awaitWriteFinish: { stabilityThreshold: 300, pollInterval: 100 }
+        usePolling: this.config.force_polling || false, // Only poll if explicitly requested in config
+        interval: 2000,
+        binaryInterval: 3000,
+        awaitWriteFinish: { stabilityThreshold: 1000, pollInterval: 500 }
       });
 
       this.watcher
@@ -515,7 +516,7 @@ class SyncSession {
         .on('change', p => this.handleLocalChange(p, this.localRoot))
         .on('unlink', p => this.handleLocalDelete(p, this.localRoot));
 
-      this.log('success', 'Local watcher started (Ignoring: node_modules, vendor, storage...)');
+      this.log('success', `Local watcher started (Using Exclude Paths from config)`);
     }
 
     // 2. Initial Sync & Interval (Remote -> Local)
@@ -572,86 +573,232 @@ class SyncSession {
     const localPath = path.join(this.localRoot, localFilename);
     const filename = path.basename(localPath);
     let client: TransferClient | null = null;
+    let retryCount = 0;
 
-    try {
-      if (!fs.existsSync(localPath)) throw new Error(`Local file not found: ${localPath}`);
-
-      client = await this.acquireClient();
-
-      // Use remoteName if provided, otherwise use localFilename
-      const effectiveRemoteName = (remoteName || localFilename).replace(/\\/g, '/');
-      const remotePath = path.posix.join(
-        this.config.target_directory || '/',
-        effectiveRemoteName
-      );
-      const remoteDir = path.posix.dirname(remotePath);
-
-      if (!this.remoteDirCache.has(remoteDir)) {
-        await client.ensureDir(remoteDir);
-        this.remoteDirCache.add(remoteDir);
-      }
-
-      await client.uploadFrom(localPath, remotePath);
-
+    const performUpload = async (): Promise<void> => {
+      let taskId: string | undefined;
       try {
-        const stats = fs.statSync(localPath);
-        await this.recordTransfer(stats.size, 'upload');
-      } catch { }
-      this.log('success', `Manual Upload: ${localFilename}${remoteName ? ` -> ${remoteName}` : ''}`);
+        if (!fs.existsSync(localPath)) throw new Error(`Local file not found: ${localPath}`);
 
-    } catch (err: any) {
-      this.log('error', `Manual upload failed: ${err.message}`);
-      if (client && (err.message.includes('closed') || err.message.includes('FIN'))) {
-        try { client.close(); } catch { }
+        client = await this.acquireClient();
+
+        // Progress Tracking Setup
+        // Progress Tracking Setup
+        taskId = Date.now().toString() + Math.random().toString(36).substr(2, 9);
+        const startTime = Date.now();
+        const totalBytes = fs.statSync(localPath).size;
+
+        this.uploadProgress.set(taskId, {
+          type: 'upload',
+          filename: localFilename,
+          totalBytes,
+          bytesTransferred: 0,
+          percent: 0,
+          speedMBps: 0,
+          etaSeconds: 0,
+          startTime
+        });
+
+        let lastProgressUpdate = 0;
+        client.trackProgress((info) => {
+          const now = Date.now();
+          if (now - lastProgressUpdate < 200) return;
+          lastProgressUpdate = now;
+
+          const elapsed = (now - startTime) / 1000;
+          const speedBps = elapsed > 0 ? info.bytes / elapsed : 0;
+          const speedMBps = speedBps / (1024 * 1024);
+          const percent = totalBytes > 0 ? Math.round((info.bytes / totalBytes) * 100) : 0;
+          const remainingBytes = totalBytes - info.bytes;
+
+          this.uploadProgress.set(taskId, {
+            type: 'upload',
+            filename: localFilename,
+            totalBytes,
+            bytesTransferred: info.bytes,
+            percent,
+            speedMBps: Math.round(speedMBps * 100) / 100,
+            etaSeconds: speedBps > 0 ? Math.round(remainingBytes / speedBps) : 0,
+            startTime
+          });
+        });
+
+        // Use remoteName if provided, otherwise use localFilename
+        const effectiveRemoteName = (remoteName || localFilename).replace(/\\/g, '/');
+        const remotePath = path.posix.join(
+          this.config.target_directory || '/',
+          effectiveRemoteName
+        );
+        const remoteDir = path.posix.dirname(remotePath);
+
+        if (!this.remoteDirCache.has(remoteDir)) {
+          await client.ensureDir(remoteDir);
+          this.remoteDirCache.add(remoteDir);
+        }
+
+        await client.uploadFrom(localPath, remotePath);
+
+        try {
+          const stats = fs.statSync(localPath);
+          await this.recordTransfer(stats.size, 'upload');
+        } catch { }
+        this.log('success', `Manual Upload: ${localFilename}${remoteName ? ` -> ${remoteName}` : ''}`);
+
+      } catch (err: any) {
+        this.log('error', `Manual upload failed: ${err.message}`);
+
+        if (client) {
+          try { client.close(); } catch { }
+          this.removeClient(client);
+          client = null;
+        }
+
+        // Retry Logic
+        if (retryCount < 3 && (
+          err.code === 425 || err.code === 421 || err.code === 530 ||
+          err.message.includes('425') || err.message.includes('421') ||
+          err.message.includes('530') || err.message.includes('closed') ||
+          err.message.includes('ECONNRESET') || err.message.includes('FIN packet unexpectedly') || err.message.includes('Operation not permitted')
+        )) {
+          retryCount++;
+          const delay = 1000 + Math.random() * 2000;
+          this.log('info', `Retrying manual upload ${filename} (Attempt ${retryCount}) in ${Math.round(delay)}ms...`);
+          await new Promise(r => setTimeout(r, delay));
+          return performUpload();
+        }
+
+        throw err;
+      } finally {
+        // Cleanup progress
+        if (taskId) this.uploadProgress.delete(taskId);
+        if (client) {
+          client.trackProgress(); // Clear listener
+          this.releaseClient(client);
+        }
       }
-      throw err;
-    } finally {
-      if (client) this.releaseClient(client);
-    }
+    };
+
+    return performUpload();
   }
 
   public async manualDownload(remoteFilePath: string) {
     let client: TransferClient | null = null;
-    try {
-      client = await this.acquireClient();
+    let retryCount = 0;
 
-      const remoteRoot = this.config.target_directory || '/';
-
-      // Manual path resolution instead of path.posix.relative
-      const normalizePath = (p: string) => p.replace(/\\/g, '/');
-      const normRemotePath = normalizePath(remoteFilePath);
-      const normRemoteRoot = normalizePath(remoteRoot);
-
-      let relPath = '';
-      if (normRemoteRoot === '/' || normRemoteRoot === '') {
-        relPath = normRemotePath.startsWith('/') ? normRemotePath.substring(1) : normRemotePath;
-      } else if (normRemotePath.startsWith(normRemoteRoot)) {
-        relPath = normRemotePath.substring(normRemoteRoot.length);
-        if (relPath.startsWith('/')) relPath = relPath.substring(1);
-      } else {
-        relPath = path.basename(remoteFilePath);
-      }
-
-      const localPath = path.join(this.localRoot, relPath.split('/').join(path.sep));
-
-      await fs.ensureDir(path.dirname(localPath));
-      await client.downloadTo(localPath, remoteFilePath);
-      this.log('success', `Manual Download: ${path.basename(remoteFilePath)}`);
-
+    const performDownload = async (): Promise<void> => {
+      let taskId: string | undefined;
       try {
-        const stats = fs.statSync(localPath);
-        await this.recordTransfer(stats.size, 'download');
-      } catch { }
+        client = await this.acquireClient();
 
-    } catch (err: any) {
-      this.log('error', `Manual download failed: ${err.message}`);
-      if (client && (err.message.includes('closed') || err.message.includes('FIN'))) {
-        try { client.close(); } catch { }
+        // Progress Tracking Setup
+        // Progress Tracking Setup
+        taskId = Date.now().toString() + Math.random().toString(36).substr(2, 9);
+        const startTime = Date.now();
+        // For download, we might need to get remote size first for percentage
+        let totalBytes = 0;
+        try {
+          const stats = await client.stat(remoteFilePath);
+          totalBytes = stats.size;
+        } catch { }
+
+        this.uploadProgress.set(taskId, {
+          type: 'download',
+          filename: path.basename(remoteFilePath),
+          totalBytes,
+          bytesTransferred: 0,
+          percent: 0,
+          speedMBps: 0,
+          etaSeconds: 0,
+          startTime
+        });
+
+        let lastProgressUpdate = 0;
+        client.trackProgress((info) => {
+          const now = Date.now();
+          if (now - lastProgressUpdate < 200) return;
+          lastProgressUpdate = now;
+
+          const elapsed = (now - startTime) / 1000;
+          const speedBps = elapsed > 0 ? info.bytes / elapsed : 0;
+          const speedMBps = speedBps / (1024 * 1024);
+          const percent = totalBytes > 0 ? Math.round((info.bytes / totalBytes) * 100) : 0;
+          const remainingBytes = totalBytes - info.bytes;
+
+          this.uploadProgress.set(taskId, {
+            type: 'download',
+            filename: path.basename(remoteFilePath),
+            totalBytes,
+            bytesTransferred: info.bytes,
+            percent,
+            speedMBps: Math.round(speedMBps * 100) / 100,
+            etaSeconds: speedBps > 0 ? Math.round(remainingBytes / speedBps) : 0,
+            startTime
+          });
+        });
+
+        const remoteRoot = this.config.target_directory || '/';
+
+        // Manual path resolution instead of path.posix.relative
+        const normalizePath = (p: string) => p.replace(/\\/g, '/');
+        const normRemotePath = normalizePath(remoteFilePath);
+        const normRemoteRoot = normalizePath(remoteRoot);
+
+        let relPath = '';
+        if (normRemoteRoot === '/' || normRemoteRoot === '') {
+          relPath = normRemotePath.startsWith('/') ? normRemotePath.substring(1) : normRemotePath;
+        } else if (normRemotePath.startsWith(normRemoteRoot)) {
+          relPath = normRemotePath.substring(normRemoteRoot.length);
+          if (relPath.startsWith('/')) relPath = relPath.substring(1);
+        } else {
+          relPath = path.basename(remoteFilePath);
+        }
+
+        const localPath = path.join(this.localRoot, relPath.split('/').join(path.sep));
+
+        await fs.ensureDir(path.dirname(localPath));
+        await client.downloadTo(localPath, remoteFilePath);
+        this.log('success', `Manual Download: ${path.basename(remoteFilePath)}`);
+
+        try {
+          const stats = fs.statSync(localPath);
+          await this.recordTransfer(stats.size, 'download');
+        } catch { }
+
+      } catch (err: any) {
+        this.log('error', `Manual download failed: ${err.message}`);
+
+        if (client) {
+          try { client.close(); } catch { }
+          this.removeClient(client);
+          client = null;
+        }
+
+        // Retry Logic
+        if (retryCount < 3 && (
+          err.code === 425 || err.code === 421 || err.code === 530 ||
+          err.message.includes('425') || err.message.includes('421') ||
+          err.message.includes('530') || err.message.includes('closed') ||
+          err.message.includes('ECONNRESET') || err.message.includes('FIN packet unexpectedly') || err.message.includes('Operation not permitted')
+        )) {
+          retryCount++;
+          const delay = 1000 + Math.random() * 2000;
+          this.log('info', `Retrying manual download ${path.basename(remoteFilePath)} (Attempt ${retryCount}) in ${Math.round(delay)}ms...`);
+          await new Promise(r => setTimeout(r, delay));
+          return performDownload();
+        }
+
+        throw err;
+      } finally {
+        // Cleanup progress
+        if (taskId) this.uploadProgress.delete(taskId);
+        if (client) {
+          client.trackProgress();
+          this.releaseClient(client);
+        }
       }
-      throw err;
-    } finally {
-      if (client) this.releaseClient(client);
-    }
+    };
+
+    return performDownload();
   }
 
   private async handleLocalChange(localPath: string, localRoot: string) {
@@ -832,6 +979,16 @@ class SyncSession {
 
         for (const item of list) {
           const itemPath = path.posix.join(dir, item.name);
+
+          // Optimization: Check ignore patterns before recursing into directories
+          // Calculate local equivalent path to check against ignore service
+          const relPath = path.posix.relative(this.config.target_directory || '/', itemPath);
+          const localPath = path.join(this.localRoot, relPath.split('/').join(path.sep));
+
+          if (await shouldIgnore(this.localRoot, localPath)) {
+            continue;
+          }
+
           if (item.isDirectory) {
             const subFiles = await this.listRemoteFilesUnified(itemPath);
             files = files.concat(subFiles);
@@ -940,7 +1097,12 @@ class SyncSession {
       this.log('info', `Found ${files.length} files in ${path.basename(remoteDirPath)}`);
 
       for (const file of files) {
-        await this.manualDownload(file.path);
+        try {
+          await this.manualDownload(file.path);
+        } catch (e: any) {
+          this.log('error', `Failed to download file ${file.name}: ${e.message}`);
+          // Continue to next file
+        }
       }
     } catch (err: any) {
       this.log('error', `Failed to download directory ${path.basename(remoteDirPath)}: ${err.message}`);

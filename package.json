@@ -79,6 +79,7 @@
     "vite-tsconfig-paths": "^5.1.4",
     "wait-on": "^9.0.3"
   },
+  "author": "ThanhTrung",
   "build": {
     "appId": "com.ftpsync.manager",
     "productName": "FTP Sync Manager",
@@ -100,6 +101,12 @@
     ],
     "win": {
       "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
     },
     "nsis": {
       "oneClick": false,

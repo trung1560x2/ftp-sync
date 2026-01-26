@@ -9,33 +9,8 @@ const ignoreCache = new Map();
  * These patterns are always applied unless overridden by .ftpignore
  */
 const DEFAULT_PATTERNS = [
-    // Version Control
-    '.git/',
-    '.svn/',
-    '.hg/',
-    // OS Files
-    '.DS_Store',
-    'Thumbs.db',
-    'desktop.ini',
-    // Dependencies
-    'node_modules/',
-    'vendor/',
-    'bower_components/',
-    // Build/Cache
-    // 'dist/',  <-- Removed to allow syncing
-    // 'build/', <-- Removed to allow syncing
-    'coverage/',
-    '.cache/',
-    'storage/',
-    'bootstrap/cache/',
-    // IDE/Editor
-    '.idea/',
-    '.vscode/',
-    '*.swp',
-    '*.swo',
-    // Logs
-    '*.log',
-    'npm-debug.log*',
+// Default patterns removed to allow full user control via .ftpignore
+// Users can add standard ignores manually if needed.
 ];
 /**
  * Get or create an Ignore instance for a given local root directory.

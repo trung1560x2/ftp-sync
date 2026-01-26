@@ -25,9 +25,12 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose })
     const [currentPath, setCurrentPath] = useState('');
     const [loading, setLoading] = useState(false);
     const [processing, setProcessing] = useState<string | null>(null);
+
+    const [isEditingPath, setIsEditingPath] = useState(false);
+    const [tempPath, setTempPath] = useState('');
     const [contentDiffFile, setContentDiffFile] = useState<{ remotePath: string; fileName: string } | null>(null);
     const [recursive, setRecursive] = useState(false);
-    const [syncProgress, setSyncProgress] = useState<{ current: number; total: number; item: string } | null>(null);
+
 
     const fetchDiff = async (path?: string) => {
         setLoading(true);
@@ -168,6 +171,59 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose })
         setSelectedItems(newSelection);
     };
 
+    // Progress State
+    const [overallProgress, setOverallProgress] = useState<{
+        activeUploads: {
+            filename: string;
+            totalBytes: number;
+            bytesTransferred: number;
+            percent: number;
+            speedMBps: number;
+            etaSeconds: number;
+        }[];
+        queueLength: number;
+        totalFilesInBatch: number;
+        completedFiles: number;
+    } | null>(null);
+
+    // Polling for progress
+    useEffect(() => {
+        let pollTimer: NodeJS.Timeout;
+
+        if (loading || processing || overallProgress) {
+            pollTimer = setInterval(async () => {
+                try {
+                    const res = await fetch(`/api/sync/progress/${connectionId}`);
+                    const data = await res.json();
+
+                    // Only update if there is active activity or we are expecting it
+                    if (data.activeUploads.length > 0 || data.queueLength > 0 || data.totalFilesInBatch > 0) {
+                        setOverallProgress(data);
+                    } else if (overallProgress && data.queueLength === 0 && data.activeUploads.length === 0) {
+                        // If we were tracking progress but now it's done
+                        // Wait a moment before clearing to show 100%
+                        setTimeout(() => {
+                            setOverallProgress(null);
+                            // Refresh diff if we just finished a batch
+                            if (processing === 'batch') {
+                                setProcessing(null);
+                                fetchDiff(currentPath);
+                                setSelectedItems(new Set());
+                            }
+                        }, 1000);
+                    }
+                } catch (e) {
+                    console.error("Poll failed", e);
+                }
+            }, 500);
+        }
+
+        return () => {
+            if (pollTimer) clearInterval(pollTimer);
+        }
+    }, [connectionId, loading, processing, overallProgress, currentPath]);
+
+
     const [confirmModal, setConfirmModal] = useState<{
         title: string;
         message: string;
@@ -178,55 +234,42 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose })
     const handleBulkSync = async (direction: 'upload' | 'download') => {
         if (selectedItems.size === 0) return;
 
+        // Collect all items to sync
         const bulkItems = items
             .filter(i => selectedItems.has(i.name))
             .map(i => ({
-                path: i.name,
-                localName: i.localName,
-                direction: direction, // Explicit direction
-                isDirectory: i.isDirectory,
-                name: i.name
+                path: i.name,         // Remote Name
+                localName: i.localName, // Local Name
+                direction: direction,
+                isDirectory: i.isDirectory
             }));
 
         if (bulkItems.length === 0) return;
 
         setConfirmModal({
             title: `Confirm Batch ${direction === 'upload' ? 'Upload' : 'Download'}`,
-            message: `Are you sure you want to ${direction} ${bulkItems.length} selected items? This will overwrite ${direction === 'upload' ? 'remote' : 'local'} files.`,
+            message: `Are you sure you want to ${direction} ${bulkItems.length} selected items? This will distribute the task to the server.`,
             type: 'warning',
             onConfirm: async () => {
                 setConfirmModal(null);
-                setSyncProgress({ current: 0, total: bulkItems.length, item: 'Starting...' });
+                setProcessing('batch'); // Mark as batch processing
 
                 try {
-                    for (let i = 0; i < bulkItems.length; i++) {
-                        const item = bulkItems[i];
-                        setSyncProgress({ current: i + 1, total: bulkItems.length, item: item.name });
+                    await fetch('/api/sync/bulk', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            id: connectionId,
+                            items: bulkItems,
+                            basePath: currentPath
+                        })
+                    });
 
-                        await fetch('/api/sync/bulk', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                id: connectionId,
-                                items: [{
-                                    path: item.path,
-                                    localName: item.localName,
-                                    direction: item.direction,
-                                    isDirectory: item.isDirectory
-                                }],
-                                basePath: currentPath
-                            })
-                        });
-                    }
+                    // Progress polling will pick up the rest via useEffect
+
                 } catch (err) {
-                    console.error('Bulk sync failed', err);
-                    // Could add a toast here, but for now console is enough or we utilize the logs
-                } finally {
-                    setSyncProgress(null);
-                    setTimeout(() => {
-                        setSelectedItems(new Set());
-                        fetchDiff(currentPath);
-                    }, 1000);
+                    console.error('Bulk sync init failed', err);
+                    setProcessing(null);
                 }
             }
         });
@@ -356,12 +399,50 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose })
                         >
                             <ArrowLeft size={16} className="text-gray-700" />
                         </button>
-                        <div className="flex items-center text-sm text-gray-700 bg-gray-100 px-3 py-1.5 rounded-md font-mono border border-gray-200">
-                            <Folder size={14} className="mr-2 text-gray-500" />
-                            {currentPath}
+                        <div
+                            className={`flex-1 flex items-center text-sm text-gray-700 bg-white hover:bg-gray-50 px-3 py-1.5 rounded-md font-mono border ${isEditingPath ? 'border-blue-500 ring-2 ring-blue-100' : 'border-gray-300 shadow-sm'} transition-all cursor-text mr-4 group`}
+                            onClick={() => {
+                                if (!isEditingPath) {
+                                    setIsEditingPath(true);
+                                    setTempPath(currentPath);
+                                }
+                            }}
+                        >
+                            <Folder size={14} className="mr-2 text-gray-500 flex-shrink-0" />
+                            {isEditingPath ? (
+                                <input
+                                    type="text"
+                                    value={tempPath}
+                                    onChange={(e) => setTempPath(e.target.value)}
+                                    onBlur={() => {
+                                        setIsEditingPath(false);
+                                        // Optional: Commit on blur? Usually better to just cancel or have user press Enter to be explicit.
+                                        // Let's cancel on blur to be safe, or just stay in edit mode?
+                                        // Standard UX is commit or revert. Let's revert if no change, or maybe just close.
+                                        // Actually, if they click away, they probably didn't mean to navigate.
+                                        if (tempPath !== currentPath) {
+                                            // Maybe ask? No, just reset.
+                                            // But for copy-paste workflows, sometimes you click out.
+                                            // Let's just reset for now.
+                                        }
+                                    }}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                            fetchDiff(tempPath);
+                                            setIsEditingPath(false);
+                                        } else if (e.key === 'Escape') {
+                                            setIsEditingPath(false);
+                                        }
+                                    }}
+                                    className="bg-transparent border-none outline-none w-full p-0 text-sm font-mono text-gray-800"
+                                    autoFocus
+                                />
+                            ) : (
+                                <span className="truncate w-full">{currentPath}</span>
+                            )}
                         </div>
 
-                        <div className="flex-1"></div>
+
 
                         <div className="flex items-center space-x-4 text-xs text-gray-500">
                             <div className="flex items-center"><div className="w-3 h-3 bg-green-500 rounded-full mr-1"></div>Newer Local</div>
@@ -590,20 +671,50 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose })
             )}
 
             {/* Sync Progress Modal */}
-            {syncProgress && (
+            {overallProgress && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
-                    <div className="bg-white p-6 rounded-xl shadow-2xl w-96">
-                        <h3 className="text-lg font-bold mb-4">Syncing Items...</h3>
-                        <div className="w-full bg-gray-200 rounded-full h-2.5 mb-4">
-                            <div
-                                className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
-                                style={{ width: `${(syncProgress.current / syncProgress.total) * 100}%` }}
-                            ></div>
-                        </div>
-                        <div className="flex justify-between text-sm text-gray-600">
-                            <span>{syncProgress.item}</span>
-                            <span>{syncProgress.current} / {syncProgress.total}</span>
-                        </div>
+                    <div className="bg-white p-6 rounded-xl shadow-2xl w-96 max-w-lg">
+                        <h3 className="text-lg font-bold mb-4 flex items-center justify-between">
+                            <span>Processing...</span>
+                            <span className="text-sm font-normal text-gray-500">
+                                {overallProgress.completedFiles} / {overallProgress.totalFilesInBatch}
+                            </span>
+                        </h3>
+
+                        {/* Queue Status */}
+                        {overallProgress.activeUploads.length === 0 && overallProgress.queueLength > 0 && (
+                            <div className="text-sm text-gray-500 mb-4 animate-pulse">
+                                Waiting for queue ({overallProgress.queueLength} items)...
+                            </div>
+                        )}
+
+                        {/* Active Uploads */}
+                        {overallProgress.activeUploads.map((upload, idx) => (
+                            <div key={idx} className="mb-4 last:mb-0">
+                                <div className="flex justify-between text-xs text-gray-700 mb-1 font-medium truncate">
+                                    <span className="truncate max-w-[70%]">{upload.filename}</span>
+                                    <span>{upload.percent}%</span>
+                                </div>
+                                <div className="w-full bg-gray-200 rounded-full h-2 mb-1">
+                                    <div
+                                        className="bg-blue-600 h-2 rounded-full transition-all duration-300 relative overflow-hidden"
+                                        style={{ width: `${upload.percent}%` }}
+                                    >
+                                        <div className="absolute inset-0 bg-white/20 animate-[shimmer_2s_infinite]"></div>
+                                    </div>
+                                </div>
+                                <div className="flex justify-between text-[10px] text-gray-500">
+                                    <span>{upload.speedMBps} MB/s</span>
+                                    <span>ETA: {upload.etaSeconds}s</span>
+                                </div>
+                            </div>
+                        ))}
+
+                        {overallProgress.activeUploads.length === 0 && overallProgress.queueLength === 0 && (
+                            <div className="text-center text-gray-500 py-2">
+                                Finishing up...
+                            </div>
+                        )}
                     </div>
                 </div>
             )}
