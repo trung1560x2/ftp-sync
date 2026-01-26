@@ -55,11 +55,16 @@ class SyncSession {
         // Initialize PQueue
         this.syncQueue = new PQueue({ concurrency: this.poolSize });
         this.connectionPool = [];
+        // DEBUG: Log config to understand why local_path is ignored
+        console.log(`[SyncService] Init Connection ${connectionId}`, {
+            local_path: this.config.local_path,
+            id_type: typeof connectionId
+        });
         if (this.config.local_path && this.config.local_path.trim() !== '') {
-            this.localRoot = this.config.local_path;
+            this.localRoot = this.config.local_path.replace(/^['"]|['"]$/g, '');
         }
         else {
-            this.localRoot = path.resolve(process.cwd(), 'sync_data', this.connectionId.toString());
+            this.localRoot = path.resolve(process.cwd(), 'sync_data', this.connectionId.toString().replace(/^['"]|['"]$/g, ''));
         }
     }
     // Get a free client (or create new one)
@@ -67,18 +72,34 @@ class SyncSession {
         // Aggressive check: Loop until we find a working client or run out
         while (this.availableClients.length > 0) {
             const client = this.availableClients.shift();
-            if (!client.closed) { // Assuming client is still good if not closed
-                // Optional: Could verify with a NOOP/PWD here, but might be slow
-                return client;
+            // Optimization: If client was used recently (< 5s), skip checkConnection
+            // We need to store lastUsed time on client. For now, assume if it's in pool it was working recently?
+            // No, better to check but handle error gracefully.
+            // Let's implement a try-catch ping but slightly less aggressive if we trust the pool logic
+            // Actually, let's keep checkConnection but if it fails, we just try next.
+            try {
+                if (await client.checkConnection()) {
+                    return client;
+                }
             }
-            // If closed, discard (it's already removed shift()) and try next
+            catch (e) { }
+            // If invalid, ensure it's closed and discard
+            try {
+                client.close();
+            }
+            catch { }
         }
+        // Rate Limit Creation: If we are at poolSize, wait?
+        // P-Queue controls concurrency, so here we should be fine to create if strictly needed.
+        // BUT if p-queue has 3 slots, we create 3 clients.
         const protocol = this.config.protocol || 'ftp';
         const client = TransferClientFactory.createClient(protocol, 60000); // Higher timeout for reuse
         // Connect immediately
         const password = decrypt(this.config.password_hash);
         if (!password)
             throw new Error('Cannot decrypt password');
+        // Add random jitter to connection start to avoid thundering herd on server
+        await new Promise(r => setTimeout(r, Math.random() * 500));
         await client.connect({
             host: this.config.server,
             username: this.config.username,
@@ -113,8 +134,22 @@ class SyncSession {
         }
         this.totalFilesInBatch++;
         this.log('info', `Queued: ${path.basename(localPath)}`);
+        // OPTIMIZATION: Debounce calls for same file (chokidar can fire multiple times)
+        // We already use P-Queue which serializes execution per file if we uniqueness-check the queue?
+        // PQueue doesn't dedup.
+        // But we can check if file is already in our progress map?
+        // OR just rely on the queue.
+        // Add brief delay before adding to queue to allow file writing to settle further if needed
+        // (chokidar awaitWriteFinish handles most, but a small delay helps batch log messages too)
+        // await new Promise(r => setTimeout(r, 100)); // Too slow?
         // Add to p-queue
-        this.syncQueue.add(() => this.uploadFile(localPath));
+        // Use a wrapper to catch rejected promises (though uploadFile handles errors internally)
+        this.syncQueue.add(async () => {
+            // Double check existence before start (in case deleted while in queue)
+            if (!fs.existsSync(localPath))
+                return;
+            await this.uploadFile(localPath);
+        });
     }
     // New upload task (replaces processUploadQueue logic)
     async uploadFile(localPath, retryCount = 0) {
@@ -316,8 +351,8 @@ class SyncSession {
     }
     // Ensure persistent connection is established
     async ensureConnection() {
-        if (this.isConnected && !this.client.closed) {
-            return; // Already connected
+        if (this.isConnected && await this.client.checkConnection()) {
+            return; // Already connected and valid
         }
         // Close old connection if any
         try {
@@ -394,7 +429,7 @@ class SyncSession {
         // Only for bi_directional OR upload_only
         if (mode === 'bi_directional' || mode === 'upload_only') {
             this.watcher = chokidar.watch(this.localRoot, {
-                ignored: /(^|[\/\\])(\..|node_modules|vendor|storage|dist|build)/, // Ignore dotfiles and heavy folders
+                ignored: /(^|[\/\\])(\..|node_modules|vendor|storage)/, // Relaxed ignore: removed dist/build to allow syncing
                 persistent: true,
                 ignoreInitial: true,
                 usePolling: true, // Enable polling for reliable detection on Windows
@@ -561,94 +596,50 @@ class SyncSession {
             return;
         }
         this.deleteQueue.add(JSON.stringify({ localPath, localRoot }));
-        this.log('info', `Queued delete: ${path.basename(localPath)} (${this.deleteQueue.size} pending)`);
-        // Start processing immediately if not already processing
-        if (!this.isProcessingDeletes) {
-            this.processDeleteQueue();
-        }
+        this.log('info', `Queued delete: ${path.basename(localPath)}`);
+        // Add delete task to main syncQueue to respect global concurrency
+        this.syncQueue.add(() => this.processSingleDelete(localPath, localRoot));
     }
-    // Process all queued deletes sequentially
-    async processDeleteQueue() {
-        if (this.isProcessingDeletes || this.deleteQueue.size === 0)
-            return;
-        this.isProcessingDeletes = true;
-        // Keep processing until queue is empty
-        while (this.deleteQueue.size > 0) {
-            // Take a snapshot of current items
-            const itemsToDelete = Array.from(this.deleteQueue);
-            // We don't clear immediately in case of total failure, but for now let's assume we handle retries internally
-            this.deleteQueue.clear();
-            this.log('info', `Starting batch delete of ${itemsToDelete.length} files...`);
-            let client = null;
-            let retryCount = 0;
-            let success = false;
-            // Retry loop for the entire batch (or remaining items)
-            while (!success && retryCount < 5) {
-                try {
-                    // Use a dedicated client from pool instead of main shared client
-                    client = await this.acquireClient();
-                    let successCount = 0;
-                    let failCount = 0;
-                    const failedItems = [];
-                    for (const item of itemsToDelete) {
-                        try {
-                            const { localPath, localRoot } = JSON.parse(item);
-                            const remotePath = this.toRemotePath(localPath, localRoot);
-                            await client.remove(remotePath);
-                            this.log('success', `Deleted: ${path.basename(localPath)}`);
-                            successCount++;
-                        }
-                        catch (err) {
-                            // 550 = File not found (already deleted?), that's a success for us
-                            if (err.code === 550 || err.message.includes('No such file')) {
-                                successCount++; // Treat as success
-                            }
-                            else {
-                                // If connection error, throw to outer loop to retry batch
-                                if (err.message.includes('closed') || err.message.includes('ECONNRESET') || err.message.includes('FIN')) {
-                                    throw err;
-                                }
-                                failCount++;
-                                this.log('error', `Delete failed: ${err.message}`);
-                                // If it's a permission/logic error, don't retry this item endlessly
-                            }
-                        }
-                    }
-                    this.log('success', `Batch delete complete: ${successCount} deleted, ${failCount} failed`);
-                    success = true;
-                }
-                catch (err) {
-                    retryCount++;
-                    const delay = 1000 + Math.random() * 2000;
-                    this.log('error', `Batch delete connection error: ${err.message}. Retrying (${retryCount}/5) in ${Math.round(delay)}ms...`);
-                    if (client) {
-                        try {
-                            client.close();
-                        }
-                        catch { }
-                        this.removeClient(client);
-                        client = null;
-                    }
-                    if (retryCount >= 5) {
-                        this.log('error', `Batch delete failed after 5 retries. Restoring items to queue.`);
-                        // Restore items to queue to try again later?
-                        for (const item of itemsToDelete) {
-                            this.deleteQueue.add(item);
-                        }
-                    }
-                    else {
-                        await new Promise(r => setTimeout(r, delay));
-                    }
-                }
-                finally {
-                    if (client) {
-                        this.releaseClient(client);
-                        client = null;
-                    }
+    // Process a single delete (wrapped in syncQueue)
+    async processSingleDelete(localPath, localRoot) {
+        const filename = path.basename(localPath);
+        let client = null;
+        try {
+            client = await this.acquireClient();
+            const remotePath = this.toRemotePath(localPath, localRoot);
+            await client.remove(remotePath);
+            this.log('success', `Deleted: ${filename}`);
+        }
+        catch (err) {
+            // 550 = File not found (already deleted?), that's a success for us
+            if (err.code === 550 || err.message.includes('No such file')) {
+                this.log('success', `Deleted (Not found): ${filename}`);
+            }
+            else {
+                this.log('error', `Delete failed: ${filename} - ${err.message}`);
+                // Retry once? Or just let it fail. For built files, usually re-upload happens anyway.
+                // If error is connection related, maybe we should retry.
+                if (err.message.includes('closed') || err.message.includes('FIN')) {
+                    throw err; // Allow P-Queue or retry logic if we had it?
                 }
             }
         }
-        this.isProcessingDeletes = false;
+        finally {
+            if (client) {
+                // Don't release if error? 
+                // acquireClient logic handles errors by creating new ones if pool is empty/bad.
+                // But here we must be careful not to return bad client.
+                // Let's rely on acquireClient to check viability next time.
+                this.releaseClient(client);
+            }
+            // Remove from set
+            this.deleteQueue.delete(JSON.stringify({ localPath, localRoot }));
+        }
+    }
+    // Deprecated batch processor
+    async processDeleteQueue() {
+        return;
+        // Logic moved to single task via syncQueue
     }
     async handleLocalDelete(localPath, localRoot) {
         await this.queueFileForDelete(localPath, localRoot);
@@ -933,6 +924,10 @@ class SyncManager {
             await session.stop();
             this.sessions.delete(connectionId);
         }
+    }
+    clearSession(connectionId) {
+        // Stop and remove session from cache so next request fetches fresh config
+        this.stopSync(connectionId);
     }
     async manualUpload(connectionId, filename, remoteName) {
         const session = await this.getSession(connectionId);

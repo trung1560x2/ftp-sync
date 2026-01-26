@@ -122,17 +122,24 @@ router.put('/:id', async (req, res) => {
             id
         ]);
         res.json({ message: 'Updated successfully' });
+        // Clear active session so next usage picks up new config
+        // @ts-ignore
+        SyncManager.clearSession(id);
     }
     catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
+import SyncManager from '../services/SyncService.js';
 // Delete connection
 router.delete('/:id', async (req, res) => {
     const { id } = req.params;
     try {
         const db = await getDb();
         await db.run('DELETE FROM ftp_connections WHERE id = ?', id);
+        // Clear active session
+        // @ts-ignore
+        SyncManager.clearSession(id);
         res.json({ message: 'Deleted successfully' });
     }
     catch (error) {

@@ -75,4 +75,15 @@ export class FtpClientAdapter {
     get closed() {
         return this.client.closed;
     }
+    async checkConnection() {
+        if (this.client.closed)
+            return false;
+        try {
+            await this.client.pwd();
+            return true;
+        }
+        catch {
+            return false;
+        }
+    }
 }

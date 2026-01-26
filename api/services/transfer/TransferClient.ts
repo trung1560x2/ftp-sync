@@ -31,5 +31,6 @@ export interface TransferClient {
     remove(remotePath: string): Promise<void>;
     rename(oldPath: string, newPath: string): Promise<void>;
     trackProgress(handler?: (info: { bytes: number; name: string }) => void): void;
+    checkConnection(): Promise<boolean>;
     readonly closed: boolean;
 }

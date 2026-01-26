@@ -117,4 +117,15 @@ export class SftpClientAdapter {
     get closed() {
         return this._closed;
     }
+    async checkConnection() {
+        if (this._closed)
+            return false;
+        try {
+            await this.client.cwd();
+            return true;
+        }
+        catch {
+            return false;
+        }
+    }
 }

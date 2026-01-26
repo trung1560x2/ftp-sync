@@ -89,4 +89,14 @@ export class FtpClientAdapter implements TransferClient {
     get closed(): boolean {
         return this.client.closed;
     }
+
+    async checkConnection(): Promise<boolean> {
+        if (this.client.closed) return false;
+        try {
+            await this.client.pwd();
+            return true;
+        } catch {
+            return false;
+        }
+    }
 }

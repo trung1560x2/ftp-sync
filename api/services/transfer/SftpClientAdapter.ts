@@ -135,4 +135,14 @@ export class SftpClientAdapter implements TransferClient {
     get closed(): boolean {
         return this._closed;
     }
+
+    async checkConnection(): Promise<boolean> {
+        if (this._closed) return false;
+        try {
+            await this.client.cwd();
+            return true;
+        } catch {
+            return false;
+        }
+    }
 }

@@ -7,6 +7,13 @@ import { getDb } from '../db.js';
 import { decrypt } from '../utils/encryption.js';
 import { TransferClientFactory } from '../services/transfer/TransferClientFactory.js';
 const router = Router();
+// Middleware to sanitize ID (remove quotes which might be sent by some clients)
+router.param('id', (req, res, next, id) => {
+    if (id) {
+        req.params.id = id.replace(/^['"]|['"]$/g, '');
+    }
+    next();
+});
 // Configure multer for uploads
 const storage = multer.diskStorage({
     destination: async function (req, file, cb) {
@@ -199,145 +206,164 @@ router.get('/local/:id', async (req, res) => {
 router.post('/upload/:id', upload.array('files'), (req, res) => {
     res.json({ success: true, message: 'Files uploaded successfully' });
 });
+// Helper for robust connection
+const connectClient = async (configOverride) => {
+    // ... logic to connect ...
+};
 // Visual Diff (Main Thread Implementation)
 router.get('/diff/:id', async (req, res) => {
     const { id } = req.params;
     const dirPath = req.query.path || '/';
-    let client = null;
-    try {
-        const config = await getConnectionConfig(id);
-        // 1. Determine Paths
-        const targetDir = (req.query.path) ? dirPath : (config.target_directory || '/');
-        const localRoot = await getLocalRoot(id, config);
-        const isRecursive = req.query.recursive === 'true';
-        // Calculate correctly scoped local directory
-        const remoteRoot = config.target_directory || '/';
-        let relativePath = '';
-        const normRemote = targetDir.replace(/\\/g, '/');
-        const normRoot = remoteRoot.replace(/\\/g, '/');
-        if (normRoot === '/' || normRoot === '') {
-            relativePath = normRemote.startsWith('/') ? normRemote.substring(1) : normRemote;
-        }
-        else if (normRemote.startsWith(normRoot)) {
-            relativePath = normRemote.substring(normRoot.length);
-            if (relativePath.startsWith('/'))
-                relativePath = relativePath.substring(1);
-        }
-        else {
-            relativePath = normRemote.startsWith('/') ? normRemote.substring(1) : normRemote;
-        }
-        const localDir = relativePath ? path.join(localRoot, relativePath.split('/').join(path.sep)) : localRoot;
-        console.log('[Diff] Target:', targetDir, 'Local:', localDir, 'Recursive:', isRecursive);
-        // 2. Connect
-        const protocol = config.protocol || 'ftp';
-        client = TransferClientFactory.createClient(protocol, 60000); // 60s timeout
-        const password = decrypt(config.password_hash);
-        await client.connect({
-            host: config.server,
-            username: config.username,
-            password: password,
-            port: config.port || (config.protocol === 'sftp' ? 22 : 21),
-            secure: config.secure ? true : false,
-            secureOptions: config.secure ? { rejectUnauthorized: false } : undefined,
-            privateKey: config.private_key
-        });
-        // 3. Scan (Parallel)
-        const [remoteFiles, localFiles] = await Promise.all([
-            scanRemote(client, targetDir, targetDir, isRecursive, IGNORED_FOLDERS),
-            scanLocal(localDir, localDir, isRecursive, IGNORED_FOLDERS)
-        ]);
-        // 4. Compare
-        const diffMap = new Map();
-        const getKey = (p) => p.toLowerCase();
-        // Process Remote
-        remoteFiles.forEach(r => {
-            const key = getKey(r.relPath);
-            diffMap.set(key, {
-                ...r,
-                localName: null,
-                status: 'missing_local',
-                remote: { size: r.size, modifiedAt: r.modifiedAt },
-                local: null
-            });
-        });
-        // Process Local
-        localFiles.forEach(l => {
-            const key = getKey(l.relPath);
-            if (diffMap.has(key)) {
-                const item = diffMap.get(key);
-                item.local = { size: l.size, modifiedAt: l.modifiedAt };
-                item.localName = l.name;
-                if (item.isDirectory) {
-                    item.status = 'synchronized'; // Folders exist on both sides
-                }
-                else {
-                    const TIME_TOLERANCE = 2000;
-                    const rTime = item.remote.modifiedAt instanceof Date ? item.remote.modifiedAt.getTime() : new Date(item.remote.modifiedAt).getTime();
-                    const lTime = new Date(l.modifiedAt).getTime();
-                    if (l.size !== item.size)
-                        item.status = 'different_size';
-                    else if (lTime > rTime + TIME_TOLERANCE)
-                        item.status = 'newer_local';
-                    else if (rTime > lTime + TIME_TOLERANCE)
-                        item.status = 'newer_remote';
-                    else
-                        item.status = 'synchronized';
-                }
+    let attempts = 0;
+    const MAX_ATTEMPTS = 3;
+    while (attempts < MAX_ATTEMPTS) {
+        let client = null;
+        try {
+            attempts++;
+            const config = await getConnectionConfig(id);
+            // 1. Determine Paths
+            const targetDir = (req.query.path) ? dirPath : (config.target_directory || '/');
+            const localRoot = await getLocalRoot(id, config);
+            const isRecursive = req.query.recursive === 'true';
+            // Calculate correctly scoped local directory
+            const remoteRoot = config.target_directory || '/';
+            let relativePath = '';
+            const normRemote = targetDir.replace(/\\/g, '/');
+            const normRoot = remoteRoot.replace(/\\/g, '/');
+            if (normRoot === '/' || normRoot === '') {
+                relativePath = normRemote.startsWith('/') ? normRemote.substring(1) : normRemote;
+            }
+            else if (normRemote.startsWith(normRoot)) {
+                relativePath = normRemote.substring(normRoot.length);
+                if (relativePath.startsWith('/'))
+                    relativePath = relativePath.substring(1);
             }
             else {
-                // New local item
-                diffMap.set(key, {
-                    name: l.name,
-                    localName: l.name,
-                    isDirectory: l.isDirectory,
-                    size: l.size,
-                    modifiedAt: l.modifiedAt,
-                    local: { size: l.size, modifiedAt: l.modifiedAt },
-                    remote: null,
-                    status: 'missing_remote',
-                    relPath: l.relPath,
-                    isDirectChild: l.isDirectChild
-                });
+                relativePath = normRemote.startsWith('/') ? normRemote.substring(1) : normRemote;
             }
-        });
-        // 5. Aggregate Changes (for Deep Scan)
-        if (isRecursive) {
-            diffMap.forEach((item, key) => {
-                if (item.status !== 'synchronized') {
-                    const parts = item.relPath.split('/');
-                    if (parts.length > 1) {
-                        // Check top-level parent (direct child of comparison root)
-                        const topLevelName = parts[0];
-                        const topLevelKey = getKey(topLevelName);
-                        const parent = diffMap.get(topLevelKey);
-                        if (parent && parent.isDirectory) {
-                            parent.containsChanges = true;
-                        }
+            const localDir = relativePath ? path.join(localRoot, relativePath.split('/').join(path.sep)) : localRoot;
+            if (attempts === 1)
+                console.log('[Diff] Target:', targetDir, 'Local:', localDir, 'Recursive:', isRecursive);
+            // 2. Connect
+            const protocol = config.protocol || 'ftp';
+            client = TransferClientFactory.createClient(protocol, 60000); // 60s timeout
+            const password = decrypt(config.password_hash);
+            await client.connect({
+                host: config.server,
+                username: config.username,
+                password: password,
+                port: config.port || (config.protocol === 'sftp' ? 22 : 21),
+                secure: config.secure ? true : false,
+                secureOptions: config.secure ? { rejectUnauthorized: false } : undefined,
+                privateKey: config.private_key
+            });
+            // 3. Scan (Parallel)
+            const [remoteFiles, localFiles] = await Promise.all([
+                scanRemote(client, targetDir, targetDir, isRecursive, IGNORED_FOLDERS),
+                scanLocal(localDir, localDir, isRecursive, IGNORED_FOLDERS)
+            ]);
+            // 4. Compare
+            const diffMap = new Map();
+            const getKey = (p) => p.toLowerCase();
+            // Process Remote
+            remoteFiles.forEach(r => {
+                const key = getKey(r.relPath);
+                diffMap.set(key, {
+                    ...r,
+                    localName: null,
+                    status: 'missing_local',
+                    remote: { size: r.size, modifiedAt: r.modifiedAt },
+                    local: null
+                });
+            });
+            // Process Local
+            localFiles.forEach(l => {
+                const key = getKey(l.relPath);
+                if (diffMap.has(key)) {
+                    const item = diffMap.get(key);
+                    item.local = { size: l.size, modifiedAt: l.modifiedAt };
+                    item.localName = l.name;
+                    if (item.isDirectory) {
+                        item.status = 'synchronized'; // Folders exist on both sides
+                    }
+                    else {
+                        const TIME_TOLERANCE = 2000;
+                        const rTime = item.remote.modifiedAt instanceof Date ? item.remote.modifiedAt.getTime() : new Date(item.remote.modifiedAt).getTime();
+                        const lTime = new Date(l.modifiedAt).getTime();
+                        if (l.size !== item.size)
+                            item.status = 'different_size';
+                        else if (lTime > rTime + TIME_TOLERANCE)
+                            item.status = 'newer_local';
+                        else if (rTime > lTime + TIME_TOLERANCE)
+                            item.status = 'newer_remote';
+                        else
+                            item.status = 'synchronized';
                     }
                 }
+                else {
+                    // New local item
+                    diffMap.set(key, {
+                        name: l.name,
+                        localName: l.name,
+                        isDirectory: l.isDirectory,
+                        size: l.size,
+                        modifiedAt: l.modifiedAt,
+                        local: { size: l.size, modifiedAt: l.modifiedAt },
+                        remote: null,
+                        status: 'missing_remote',
+                        relPath: l.relPath,
+                        isDirectChild: l.isDirectChild
+                    });
+                }
             });
-        }
-        // 6. Filter & Sort
-        const diffs = Array.from(diffMap.values())
-            .filter(item => item.isDirectChild)
-            .sort((a, b) => {
-            if (a.isDirectory === b.isDirectory)
-                return a.name.localeCompare(b.name);
-            return a.isDirectory ? -1 : 1;
-        });
-        res.json({ diffs, currentPath: targetDir });
-    }
-    catch (error) {
-        console.error('[Diff Route Error]', error);
-        res.status(500).json({ error: error.message });
-    }
-    finally {
-        if (client) {
-            try {
-                client.close();
+            // 5. Aggregate Changes (for Deep Scan)
+            if (isRecursive) {
+                diffMap.forEach((item, key) => {
+                    if (item.status !== 'synchronized') {
+                        const parts = item.relPath.split('/');
+                        if (parts.length > 1) {
+                            // Check top-level parent (direct child of comparison root)
+                            const topLevelName = parts[0];
+                            const topLevelKey = getKey(topLevelName);
+                            const parent = diffMap.get(topLevelKey);
+                            if (parent && parent.isDirectory) {
+                                parent.containsChanges = true;
+                            }
+                        }
+                    }
+                });
             }
-            catch { }
+            // 6. Filter & Sort
+            const diffs = Array.from(diffMap.values())
+                .filter(item => item.isDirectChild)
+                .sort((a, b) => {
+                if (a.isDirectory === b.isDirectory)
+                    return a.name.localeCompare(b.name);
+                return a.isDirectory ? -1 : 1;
+            });
+            res.json({ diffs, currentPath: targetDir });
+            return; // Success, exit function
         }
-    }
+        catch (error) {
+            console.error(`[Diff Route Error] Attempt ${attempts} failed:`, error.message);
+            // Cleanup client inside loop before retrying
+            if (client) {
+                try {
+                    client.close();
+                }
+                catch { }
+            }
+            // Retry only on connection-related errors
+            const isConnectionError = error.message.includes('FIN packet') ||
+                error.message.includes('ECONNRESET') ||
+                error.message.includes('Timed out');
+            if (attempts >= MAX_ATTEMPTS || !isConnectionError) {
+                res.status(500).json({ error: error.message });
+                return;
+            }
+            // Wait before retry (exponential backoff: 500, 1000, 2000...)
+            await new Promise(r => setTimeout(r, 500 * Math.pow(2, attempts - 1)));
+        }
+    } // end while
 });
 export default router;

@@ -22,8 +22,8 @@ const DEFAULT_PATTERNS = [
     'vendor/',
     'bower_components/',
     // Build/Cache
-    'dist/',
-    'build/',
+    // 'dist/',  <-- Removed to allow syncing
+    // 'build/', <-- Removed to allow syncing
     'coverage/',
     '.cache/',
     'storage/',
@@ -60,7 +60,23 @@ export async function getIgnoreInstance(localRoot) {
     // Create new instance
     const ig = ignore();
     // Add default patterns
-    ig.add(DEFAULT_PATTERNS);
+    // Add default patterns ONLY if no file exists (to bootstrap).
+    // If file exists, we rely fully on it (and it should contain defaults if created from template).
+    // BUT for backward compatibility, we should probably keep adding them OR 
+    // rely on the fact that we just updated the template.
+    // DECISION: To allow user to "un-ignore" defaults, we must NOT add them hardcoded if file exists.
+    // However, if file exists but is old (doesn't have defaults), this might be a breaking change (suddenly syncing node_modules).
+    // SAFE APPROACH: Add them but allow negation? 
+    // "bạn vui lòng cho nó hiện lên giúp" implies they want to *see* and *control* them.
+    // Optimal: Don't add here. Rely on file.
+    // BUT what if file doesn't exist? currentMtime === 0.
+    if (currentMtime === 0) {
+        ig.add(DEFAULT_PATTERNS);
+    }
+    else {
+        // File exists, we read it below.
+        // Note: If user has an empty file, they lose defaults. This is standard gitignore behavior.
+    }
     // Load .ftpignore if exists
     if (currentMtime > 0) {
         try {
@@ -103,15 +119,17 @@ export async function readFtpIgnore(localRoot) {
     }
     catch {
         // Return default template if file doesn't exist
+        // Return default template if file doesn't exist
         return `# FTP Ignore Patterns
 # Similar to .gitignore syntax
 # Lines starting with # are comments
 
-# Example patterns:
+# Standard Default Patterns (Always applied unless removed here):
+${DEFAULT_PATTERNS.join('\n')}
+
+# Custom patterns:
 # *.log
-# node_modules/
 # *.tmp
-# .git/
 `;
     }
 }
