@@ -3,6 +3,10 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/trung1560x2/ftp-sync.git"
+  },
   "main": "electron/main.js",
   "scripts": {
     "client:dev": "vite",
