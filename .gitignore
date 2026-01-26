@@ -26,3 +26,18 @@ dist-ssr
 .vite
 .agent/
 release_v4/
+# Local Data
+*.sqlite
+*.db
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsconfig.server.json
+!nodemon.json
+!vercel.json
+!src/**/*.json
+config_debug.txt
+check_*.js
+debug_*.js
+

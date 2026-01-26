@@ -1,0 +1,50 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      # Force rebuild of native modules for the current OS/Arch if strictly necessary,
+      # though electron-builder usually handles this.
+      # Adding explicit rebuild to be safe given sqlite3 usage.
+      - name: Rebuild Native Modules
+        shell: bash
+        run: |
+          npm run build
+          npm run build:server
+          # Ensure electron-builder is available to install-app-deps
+          npx electron-builder install-app-deps
+
+      - name: Build and Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Default npm run dist runs: npm run build && npm run build:server && electron-builder
+        # We add -p always to publish to GitHub Releases
+        run: npm run dist -- -p always
