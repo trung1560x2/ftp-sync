@@ -189,6 +189,7 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose })
     // Polling for progress
     useEffect(() => {
         let pollTimer: NodeJS.Timeout;
+        let completionTimerRef: NodeJS.Timeout | null = null;
 
         if (loading || processing || overallProgress) {
             pollTimer = setInterval(async () => {
@@ -196,21 +197,44 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose })
                     const res = await fetch(`/api/sync/progress/${connectionId}`);
                     const data = await res.json();
 
+                    // If we're in batch mode and haven't shown the modal yet, show it immediately
+                    // This handles the "scanning folder" state
+                    if (processing === 'batch' && !overallProgress) {
+                        setOverallProgress({
+                            activeUploads: [],
+                            queueLength: 0,
+                            totalFilesInBatch: 0,
+                            completedFiles: 0
+                        });
+                    }
+
+                    // Check for actual completion first
+                    const isComplete = data.activeUploads.length === 0 &&
+                        data.queueLength === 0 &&
+                        (data.totalFilesInBatch === 0 ||
+                            (data.totalFilesInBatch > 0 && data.completedFiles >= data.totalFilesInBatch));
+
                     // Only update if there is active activity or we are expecting it
                     if (data.activeUploads.length > 0 || data.queueLength > 0 || data.totalFilesInBatch > 0) {
                         setOverallProgress(data);
-                    } else if (overallProgress && data.queueLength === 0 && data.activeUploads.length === 0) {
-                        // If we were tracking progress but now it's done
-                        // Wait a moment before clearing to show 100%
-                        setTimeout(() => {
-                            setOverallProgress(null);
-                            // Refresh diff if we just finished a batch
-                            if (processing === 'batch') {
+
+                        // Clear any pending completion timer ONLY if we're not complete
+                        if (!isComplete && completionTimerRef) {
+                            clearTimeout(completionTimerRef);
+                            completionTimerRef = null;
+                        }
+                    }
+
+                    if (isComplete && overallProgress) {
+                        // If completed, wait a moment to show 100% then close
+                        if (!completionTimerRef) {
+                            completionTimerRef = setTimeout(() => {
+                                setOverallProgress(null);
                                 setProcessing(null);
                                 fetchDiff(currentPath);
                                 setSelectedItems(new Set());
-                            }
-                        }, 1000);
+                            }, 1500);
+                        }
                     }
                 } catch (e) {
                     console.error("Poll failed", e);
@@ -220,6 +244,7 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose })
 
         return () => {
             if (pollTimer) clearInterval(pollTimer);
+            if (completionTimerRef) clearTimeout(completionTimerRef);
         }
     }, [connectionId, loading, processing, overallProgress, currentPath]);
 
@@ -283,7 +308,7 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose })
             type: 'warning',
             onConfirm: async () => {
                 setConfirmModal(null);
-                setProcessing(item.name);
+                setProcessing('batch'); // Mark as batch processing to enable progress polling
 
                 try {
                     await fetch('/api/sync/bulk', {
@@ -301,11 +326,11 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose })
                         })
                     });
 
-                    setTimeout(() => fetchDiff(currentPath), 1000);
+                    // Progress polling will pick up the rest via useEffect
+                    // Don't reset processing here - let the polling logic handle completion
                 } catch (err) {
                     console.error('Folder sync failed', err);
-                } finally {
-                    setProcessing(null);
+                    setProcessing(null); // Only reset on error
                 }
             }
         });
@@ -671,53 +696,89 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose })
             )}
 
             {/* Sync Progress Modal */}
-            {overallProgress && (
-                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
-                    <div className="bg-white p-6 rounded-xl shadow-2xl w-96 max-w-lg">
-                        <h3 className="text-lg font-bold mb-4 flex items-center justify-between">
-                            <span>Processing...</span>
-                            <span className="text-sm font-normal text-gray-500">
-                                {overallProgress.completedFiles} / {overallProgress.totalFilesInBatch}
-                            </span>
-                        </h3>
+            {overallProgress && (() => {
+                // Cap values to never exceed 100%
+                const displayCompleted = Math.min(overallProgress.completedFiles, overallProgress.totalFilesInBatch);
+                const progressPercent = overallProgress.totalFilesInBatch > 0
+                    ? Math.min(100, Math.round((displayCompleted / overallProgress.totalFilesInBatch) * 100))
+                    : 0;
 
-                        {/* Queue Status */}
-                        {overallProgress.activeUploads.length === 0 && overallProgress.queueLength > 0 && (
-                            <div className="text-sm text-gray-500 mb-4 animate-pulse">
-                                Waiting for queue ({overallProgress.queueLength} items)...
-                            </div>
-                        )}
+                return (
+                    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
+                        <div className="bg-white p-6 rounded-xl shadow-2xl w-96 max-w-lg">
+                            <h3 className="text-lg font-bold mb-4 flex items-center justify-between">
+                                <span>Processing...</span>
+                                {overallProgress.totalFilesInBatch > 0 && (
+                                    <span className="text-sm font-normal text-gray-500">
+                                        {displayCompleted} / {overallProgress.totalFilesInBatch} files
+                                    </span>
+                                )}
+                            </h3>
 
-                        {/* Active Uploads */}
-                        {overallProgress.activeUploads.map((upload, idx) => (
-                            <div key={idx} className="mb-4 last:mb-0">
-                                <div className="flex justify-between text-xs text-gray-700 mb-1 font-medium truncate">
-                                    <span className="truncate max-w-[70%]">{upload.filename}</span>
-                                    <span>{upload.percent}%</span>
-                                </div>
-                                <div className="w-full bg-gray-200 rounded-full h-2 mb-1">
-                                    <div
-                                        className="bg-blue-600 h-2 rounded-full transition-all duration-300 relative overflow-hidden"
-                                        style={{ width: `${upload.percent}%` }}
-                                    >
-                                        <div className="absolute inset-0 bg-white/20 animate-[shimmer_2s_infinite]"></div>
+                            {/* Overall Progress Bar */}
+                            {overallProgress.totalFilesInBatch > 0 && (
+                                <div className="mb-4">
+                                    <div className="flex justify-between text-xs text-gray-600 mb-1">
+                                        <span>Overall Progress</span>
+                                        <span>{progressPercent}%</span>
+                                    </div>
+                                    <div className="w-full bg-gray-200 rounded-full h-3 mb-1">
+                                        <div
+                                            className="bg-gradient-to-r from-green-500 to-green-600 h-3 rounded-full transition-all duration-500 relative overflow-hidden"
+                                            style={{ width: `${progressPercent}%` }}
+                                        >
+                                            <div className="absolute inset-0 bg-white/20 animate-[shimmer_2s_infinite]"></div>
+                                        </div>
                                     </div>
                                 </div>
-                                <div className="flex justify-between text-[10px] text-gray-500">
-                                    <span>{upload.speedMBps} MB/s</span>
-                                    <span>ETA: {upload.etaSeconds}s</span>
-                                </div>
-                            </div>
-                        ))}
+                            )}
 
-                        {overallProgress.activeUploads.length === 0 && overallProgress.queueLength === 0 && (
-                            <div className="text-center text-gray-500 py-2">
-                                Finishing up...
-                            </div>
-                        )}
+                            {/* Scanning/Queue Status */}
+                            {overallProgress.activeUploads.length === 0 && overallProgress.totalFilesInBatch === 0 && overallProgress.queueLength === 0 && (
+                                <div className="text-sm text-gray-500 mb-4 animate-pulse flex items-center">
+                                    <RefreshCw size={14} className="mr-2 animate-spin" />
+                                    Scanning folder...
+                                </div>
+                            )}
+
+                            {/* Queue Status */}
+                            {overallProgress.activeUploads.length === 0 && overallProgress.queueLength > 0 && (
+                                <div className="text-sm text-gray-500 mb-4 animate-pulse">
+                                    Waiting for queue ({overallProgress.queueLength} items)...
+                                </div>
+                            )}
+
+                            {/* Active Uploads */}
+                            {overallProgress.activeUploads.map((upload, idx) => (
+                                <div key={idx} className="mb-4 last:mb-0">
+                                    <div className="flex justify-between text-xs text-gray-700 mb-1 font-medium truncate">
+                                        <span className="truncate max-w-[70%]">{upload.filename}</span>
+                                        <span>{upload.percent}%</span>
+                                    </div>
+                                    <div className="w-full bg-gray-200 rounded-full h-2 mb-1">
+                                        <div
+                                            className="bg-blue-600 h-2 rounded-full transition-all duration-300 relative overflow-hidden"
+                                            style={{ width: `${upload.percent}%` }}
+                                        >
+                                            <div className="absolute inset-0 bg-white/20 animate-[shimmer_2s_infinite]"></div>
+                                        </div>
+                                    </div>
+                                    <div className="flex justify-between text-[10px] text-gray-500">
+                                        <span>{upload.speedMBps} MB/s</span>
+                                        <span>ETA: {upload.etaSeconds}s</span>
+                                    </div>
+                                </div>
+                            ))}
+
+                            {overallProgress.activeUploads.length === 0 && overallProgress.queueLength === 0 && overallProgress.totalFilesInBatch > 0 && (
+                                <div className="text-center text-gray-500 py-2">
+                                    Finishing up...
+                                </div>
+                            )}
+                        </div>
                     </div>
-                </div>
-            )}
+                );
+            })()}
 
             {/* Content Diff Modal */}
             {contentDiffFile && (

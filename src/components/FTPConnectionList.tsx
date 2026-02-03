@@ -44,6 +44,9 @@ const FTPConnectionList: React.FC<Props> = ({ connections, onEdit, onDelete }) =
   const [activeDeployment, setActiveDeployment] = useState<number | null>(null);
   const [syncPausedForDiff, setSyncPausedForDiff] = useState<number | null>(null);
 
+  // Accordion State - track which cards are expanded
+  const [expandedCards, setExpandedCards] = useState<Record<number, boolean>>({});
+
   // Sync State
   const [syncStatuses, setSyncStatuses] = useState<Record<number, SyncStatus>>({});
   const [expandedLogs, setExpandedLogs] = useState<Record<number, boolean>>({});
@@ -190,6 +193,10 @@ const FTPConnectionList: React.FC<Props> = ({ connections, onEdit, onDelete }) =
     setExpandedLogs(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
+  const toggleCard = (id: number) => {
+    setExpandedCards(prev => ({ ...prev, [id]: !prev[id] }));
+  };
+
   const handleOpenVisualDiff = async (conn: FTPConnection) => {
     // Check if sync is running
     const isSyncing = syncStatuses[conn.id]?.running;
@@ -258,164 +265,208 @@ const FTPConnectionList: React.FC<Props> = ({ connections, onEdit, onDelete }) =
           onClose={() => setActiveDeployment(null)}
         />
       )}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-6">
+      {/* Accordion Connection List */}
+      <div className="space-y-2">
         {connections.map((conn) => {
           const isSyncing = syncStatuses[conn.id]?.running || false;
           const logs = syncStatuses[conn.id]?.logs || [];
           const lastLog = logs.length > 0 ? logs[0] : null;
+          const isExpanded = expandedCards[conn.id] || false;
 
           return (
-            <div key={conn.id} className="bg-white rounded-lg shadow-sm border border-gray-200 flex flex-col hover:shadow-md transition-shadow">
-              <div className="p-5 flex-1">
-                {/* Header */}
-                <div className="flex justify-between items-start mb-4">
-                  <div className="flex items-center">
-                    <div className={`p-2 rounded-lg mr-4 ${isSyncing ? 'bg-green-50' : 'bg-blue-50'}`}>
-                      <Server className={`h-6 w-6 ${isSyncing ? 'text-green-600 animate-pulse' : 'text-blue-600'}`} />
-                    </div>
-                    <div>
-                      <h4 className="font-bold text-gray-800 text-lg truncate max-w-[180px]" title={conn.name || conn.server}>
+            <div key={conn.id} className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden transition-all duration-300">
+              {/* Compact Header - Always Visible */}
+              <div
+                className="p-3 flex items-center justify-between cursor-pointer hover:bg-gray-50 transition-colors"
+                onClick={() => toggleCard(conn.id)}
+              >
+                <div className="flex items-center flex-1 min-w-0">
+                  {/* Status Indicator */}
+                  <div className={`w-3 h-3 rounded-full mr-3 flex-shrink-0 ${isSyncing ? 'bg-green-500 animate-pulse' : 'bg-gray-300'}`} />
+
+                  {/* Server Icon */}
+                  <Server className={`h-5 w-5 mr-3 flex-shrink-0 ${isSyncing ? 'text-green-600' : 'text-blue-600'}`} />
+
+                  {/* Name & Server Info */}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <h4 className="font-semibold text-gray-800 truncate" title={conn.name || conn.server}>
                         {conn.name || conn.server}
                       </h4>
-                      <div className="text-sm text-gray-500 flex flex-col">
-                        {conn.name && <span className="text-xs text-gray-400 truncate w-[180px]" title={conn.server}>{conn.server}</span>}
-                        <span>Port: {conn.port}</span>
+                      {isSyncing && (
+                        <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">
+                          Syncing
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-gray-500 truncate">
+                      {conn.server}:{conn.port} • {conn.username}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Quick Actions (visible in collapsed state) */}
+                <div className="flex items-center gap-1 ml-2" onClick={(e) => e.stopPropagation()}>
+                  <button
+                    onClick={() => toggleSync(conn.id, isSyncing)}
+                    className={`p-1.5 rounded-md transition-colors ${isSyncing
+                      ? 'text-red-600 hover:bg-red-50'
+                      : 'text-green-600 hover:bg-green-50'
+                      }`}
+                    title={isSyncing ? 'Stop Sync' : 'Start Sync'}
+                  >
+                    {isSyncing ? <Square size={16} className="fill-current" /> : <Play size={16} className="fill-current" />}
+                  </button>
+                  <button
+                    onClick={() => onEdit(conn)}
+                    className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition-colors"
+                    title="Edit"
+                  >
+                    <Edit2 size={16} />
+                  </button>
+                  <button
+                    onClick={() => onDelete(conn.id)}
+                    className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors"
+                    title="Delete"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+
+                  {/* Expand/Collapse Toggle */}
+                  <div className="ml-2 text-gray-400">
+                    {isExpanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+                  </div>
+                </div>
+              </div>
+
+              {/* Expandable Details */}
+              {isExpanded && (
+                <div className="border-t border-gray-100 animate-fadeIn">
+                  <div className="p-4">
+                    {/* Connection Details */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4 text-sm">
+                      <div>
+                        <span className="text-gray-500 block text-xs uppercase tracking-wider mb-1">Server</span>
+                        <span className="font-medium text-gray-800">{conn.server}</span>
+                      </div>
+                      <div>
+                        <span className="text-gray-500 block text-xs uppercase tracking-wider mb-1">Port</span>
+                        <span className="font-medium text-gray-800">{conn.port}</span>
+                      </div>
+                      <div>
+                        <span className="text-gray-500 block text-xs uppercase tracking-wider mb-1">Username</span>
+                        <span className="font-medium text-gray-800">{conn.username}</span>
+                      </div>
+                      <div>
+                        <span className="text-gray-500 block text-xs uppercase tracking-wider mb-1">Target Directory</span>
+                        <span className="font-medium text-gray-800 font-mono text-xs bg-gray-100 px-2 py-1 rounded">
+                          {conn.target_directory || '/'}
+                        </span>
                       </div>
                     </div>
-                  </div>
-                  <div className="flex space-x-2">
-                    <button
-                      onClick={() => setActiveStats({ connectionId: conn.id, server: conn.server })}
-                      className="p-2 text-gray-400 hover:text-purple-600 hover:bg-gray-50 rounded-full transition-colors"
-                      title="Statistics & Logs"
-                    >
-                      <BarChart2 size={18} />
-                    </button>
-                    <button
-                      onClick={() => setActiveFileManager({ connectionId: conn.id, path: '/' })}
-                      className="p-2 text-gray-400 hover:text-indigo-600 hover:bg-gray-50 rounded-full transition-colors"
-                      title="File Manager"
-                    >
-                      <Folder size={18} />
-                    </button>
-                    <button
-                      onClick={() => handleOpenVisualDiff(conn)}
-                      className="p-2 text-gray-400 hover:text-teal-600 hover:bg-gray-50 rounded-full transition-colors"
-                      title="Visual Diff (Compare info)"
-                    >
-                      <GitCompare size={18} />
-                    </button>
-                    <button
-                      onClick={() => onEdit(conn)}
-                      className="p-2 text-gray-400 hover:text-blue-600 hover:bg-gray-50 rounded-full transition-colors"
-                      title="Edit"
-                    >
-                      <Edit2 size={18} />
-                    </button>
-                    <button
-                      onClick={() => onDelete(conn.id)}
-                      className="p-2 text-gray-400 hover:text-red-600 hover:bg-gray-50 rounded-full transition-colors"
-                      title="Delete"
-                    >
-                      <Trash2 size={18} />
-                    </button>
-                  </div>
-                </div>
 
-                {/* Details */}
-                <div className="space-y-2 text-sm text-gray-600 mb-5 pl-1">
-                  <div className="flex items-center">
-                    <span className="font-medium text-gray-500 mr-2 w-16">User:</span>
-                    <span className="truncate font-medium">{conn.username}</span>
-                  </div>
-                  <div className="flex items-center">
-                    <span className="font-medium text-gray-500 mr-2 w-16">Target:</span>
-                    <span className="truncate bg-gray-100 px-2 py-0.5 rounded text-gray-600 font-mono text-xs" title={conn.target_directory}>
-                      {conn.target_directory || '/'}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Upload Progress Bar */}
-                {syncStatuses[conn.id]?.running && uploadProgress[conn.id] && (
-                  <UploadProgressBar progress={uploadProgress[conn.id]} />
-                )}
-
-                {/* Sync Status & Logs Preview */}
-                <div className="bg-gray-900 rounded-lg p-3 text-sm font-mono min-h-[100px] border border-gray-700 text-gray-200">
-                  <div className="flex justify-between items-center mb-2 border-b border-gray-700 pb-2">
-                    <span className="font-bold text-gray-400 uppercase tracking-wider text-xs">Activity Log</span>
-                    {logs.length > 0 && (
-                      <button onClick={() => toggleLogs(conn.id)} className="text-blue-400 hover:text-blue-300 flex items-center bg-gray-800 px-2 py-0.5 rounded border border-gray-600 shadow-sm">
-                        {expandedLogs[conn.id] ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                    {/* Action Buttons Row */}
+                    <div className="flex flex-wrap gap-2 mb-4">
+                      <button
+                        onClick={() => setActiveStats({ connectionId: conn.id, server: conn.server })}
+                        className="flex items-center px-3 py-1.5 text-sm text-purple-700 bg-purple-50 hover:bg-purple-100 rounded-md transition-colors"
+                      >
+                        <BarChart2 size={14} className="mr-1.5" /> Statistics
                       </button>
+                      <button
+                        onClick={() => setActiveFileManager({ connectionId: conn.id, path: '/' })}
+                        className="flex items-center px-3 py-1.5 text-sm text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-md transition-colors"
+                      >
+                        <Folder size={14} className="mr-1.5" /> File Manager
+                      </button>
+                      <button
+                        onClick={() => handleOpenVisualDiff(conn)}
+                        className="flex items-center px-3 py-1.5 text-sm text-teal-700 bg-teal-50 hover:bg-teal-100 rounded-md transition-colors"
+                      >
+                        <GitCompare size={14} className="mr-1.5" /> Visual Diff
+                      </button>
+                      <button
+                        onClick={() => handleTestConnection(conn)}
+                        disabled={testingId === conn.id}
+                        className={`flex items-center px-3 py-1.5 text-sm rounded-md transition-colors ${testResult?.id === conn.id && testResult.success
+                            ? 'bg-green-100 text-green-800'
+                            : testResult?.id === conn.id && !testResult.success
+                              ? 'bg-red-100 text-red-800'
+                              : 'text-gray-700 bg-gray-100 hover:bg-gray-200'
+                          }`}
+                      >
+                        <Wifi size={14} className="mr-1.5" /> {testingId === conn.id ? 'Testing...' : 'Test Connection'}
+                      </button>
+                    </div>
+
+                    {/* Upload Progress Bar */}
+                    {syncStatuses[conn.id]?.running && uploadProgress[conn.id] && (
+                      <div className="mb-4">
+                        <UploadProgressBar progress={uploadProgress[conn.id]} />
+                      </div>
                     )}
-                  </div>
-                  {expandedLogs[conn.id] ? (
-                    <div className="max-h-64 overflow-y-auto space-y-1 pr-1 custom-scrollbar">
-                      {logs.map((log, i) => (
-                        <div key={i} className={`truncate ${log.type === 'error' ? 'text-red-400' :
-                          log.type === 'success' ? 'text-green-400' : 'text-gray-300'
-                          }`}>
-                          <span className="text-gray-500 text-xs mr-2">[{new Date(log.timestamp).toLocaleTimeString()}]</span>
-                          {log.message}
+
+                    {/* Activity Log */}
+                    <div className="bg-gray-900 rounded-lg p-3 text-sm font-mono border border-gray-700 text-gray-200">
+                      <div className="flex justify-between items-center mb-2 border-b border-gray-700 pb-2">
+                        <span className="font-bold text-gray-400 uppercase tracking-wider text-xs">Activity Log</span>
+                        {logs.length > 0 && (
+                          <button onClick={() => toggleLogs(conn.id)} className="text-blue-400 hover:text-blue-300 flex items-center bg-gray-800 px-2 py-0.5 rounded border border-gray-600 shadow-sm">
+                            {expandedLogs[conn.id] ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                          </button>
+                        )}
+                      </div>
+                      {expandedLogs[conn.id] ? (
+                        <div className="max-h-48 overflow-y-auto space-y-1 pr-1 custom-scrollbar">
+                          {logs.map((log, i) => (
+                            <div key={i} className={`truncate ${log.type === 'error' ? 'text-red-400' :
+                              log.type === 'success' ? 'text-green-400' : 'text-gray-300'
+                              }`}>
+                              <span className="text-gray-500 text-xs mr-2">[{new Date(log.timestamp).toLocaleTimeString()}]</span>
+                              {log.message}
+                            </div>
+                          ))}
                         </div>
-                      ))}
+                      ) : (
+                        <div className={`truncate ${lastLog?.type === 'error' ? 'text-red-400' :
+                          lastLog?.type === 'success' ? 'text-green-400' : 'text-gray-400'
+                          }`}>
+                          {lastLog ? (
+                            <>
+                              <span className="text-gray-500 text-xs mr-2">[{new Date(lastLog.timestamp).toLocaleTimeString()}]</span>
+                              {lastLog.message}
+                            </>
+                          ) : 'No activity yet...'}
+                        </div>
+                      )}
                     </div>
-                  ) : (
-                    <div className={`truncate ${lastLog?.type === 'error' ? 'text-red-400' :
-                      lastLog?.type === 'success' ? 'text-green-400' : 'text-gray-400'
-                      }`}>
-                      {lastLog ? (
-                        <>
-                          <span className="text-gray-500 text-xs mr-2">[{new Date(lastLog.timestamp).toLocaleTimeString()}]</span>
-                          {lastLog.message}
-                        </>
-                      ) : 'No activity yet...'}
+
+                    {/* Deploy & Sync Actions */}
+                    <div className="mt-4 flex gap-3">
+                      <button
+                        onClick={() => setActiveDeployment(conn.id)}
+                        className="flex-1 flex items-center justify-center px-4 py-2.5 text-sm font-bold text-white bg-gradient-to-r from-purple-600 to-indigo-600 rounded-md hover:from-purple-700 hover:to-indigo-700 shadow-md transform transition-transform active:scale-95"
+                        title="Zero-Downtime Deployment & Rollback"
+                      >
+                        <Rocket size={16} className="mr-2" /> Deploy & Rollback
+                      </button>
+                      <button
+                        onClick={() => toggleSync(conn.id, isSyncing)}
+                        className={`flex-1 flex items-center justify-center px-4 py-2.5 text-sm font-bold rounded-md transition-colors text-white ${isSyncing
+                          ? 'bg-red-500 hover:bg-red-600'
+                          : 'bg-blue-600 hover:bg-blue-700'
+                          }`}
+                      >
+                        {isSyncing ? (
+                          <><Square size={16} className="mr-2 fill-current" /> Stop Sync</>
+                        ) : (
+                          <><Play size={16} className="mr-2 fill-current" /> Start Sync</>
+                        )}
+                      </button>
                     </div>
-                  )}
+                  </div>
                 </div>
-              </div>
-
-              {/* Actions Footer */}
-              <div className="p-3 bg-gray-50 border-t border-gray-100 rounded-b-lg grid grid-cols-2 gap-3">
-                <button
-                  onClick={() => setActiveDeployment(conn.id)}
-                  className="col-span-2 flex items-center justify-center px-3 py-2 text-sm font-bold text-white bg-gradient-to-r from-purple-600 to-indigo-600 rounded-md hover:from-purple-700 hover:to-indigo-700 shadow-md transform transition-transform active:scale-95"
-                  title="Zero-Downtime Deployment & Rollback"
-                >
-                  <Rocket size={16} className="mr-2" /> Deploy & Rollback
-                </button>
-
-                <button
-                  onClick={() => handleTestConnection(conn)}
-                  disabled={testingId === conn.id}
-                  className={`flex items-center justify-center px-3 py-2 text-sm font-medium rounded-md transition-colors ${testResult?.id === conn.id && testResult.success
-                    ? 'bg-green-100 text-green-800'
-                    : testResult?.id === conn.id && !testResult.success
-                      ? 'bg-red-100 text-red-800'
-                      : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
-                    }`}
-                >
-                  {testingId === conn.id ? 'Testing...' : (
-                    <><Wifi size={14} className="mr-2" /> Test</>
-                  )}
-                </button>
-
-                <button
-                  onClick={() => toggleSync(conn.id, isSyncing)}
-                  className={`flex items-center justify-center px-3 py-2 text-sm font-medium rounded-md transition-colors text-white ${isSyncing
-                    ? 'bg-red-500 hover:bg-red-600'
-                    : 'bg-blue-600 hover:bg-blue-700'
-                    }`}
-                >
-                  {isSyncing ? (
-                    <><Square size={14} className="mr-2 fill-current" /> Stop Sync</>
-                  ) : (
-                    <><Play size={14} className="mr-2 fill-current" /> Start Sync</>
-                  )}
-                </button>
-              </div>
+              )}
             </div>
           );
         })}

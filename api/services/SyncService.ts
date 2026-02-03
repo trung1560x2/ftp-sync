@@ -331,7 +331,11 @@ class SyncSession {
 
         // Add random delay to avoid Thundering Herd on server limits
         await new Promise(resolve => setTimeout(resolve, delay));
-        return this.uploadFile(localPath, retryCount + 1);
+
+        // IMPORTANT: Don't increment completedFilesInBatch here - let the retry handle it
+        // We use a separate call that bypasses the finally increment
+        await this.uploadFile(localPath, retryCount + 1);
+        return; // Return without going through finally's increment
       }
     } finally {
       if (client) {
@@ -339,11 +343,29 @@ class SyncSession {
         this.releaseClient(client);
       }
       this.uploadProgress.delete(taskId);
-      this.completedFilesInBatch++;
 
-      if (this.syncQueue.pending === 0 && this.syncQueue.size === 0) {
-        this.totalFilesInBatch = 0;
-        this.completedFilesInBatch = 0;
+      // Only increment if this is not a retry attempt (retryCount 0 means first attempt)
+      // For retries, the final successful attempt will increment
+      if (retryCount === 0 || this.completedFilesInBatch < this.totalFilesInBatch) {
+        this.completedFilesInBatch++;
+      }
+
+      // Cap completedFiles to never exceed totalFiles
+      if (this.completedFilesInBatch > this.totalFilesInBatch && this.totalFilesInBatch > 0) {
+        this.completedFilesInBatch = this.totalFilesInBatch;
+      }
+
+      // Only reset counters when all queued work is done AND completed equals total
+      // This prevents premature reset during folder scanning
+      if (this.syncQueue.pending === 0 && this.syncQueue.size === 0 &&
+        this.completedFilesInBatch >= this.totalFilesInBatch && this.totalFilesInBatch > 0) {
+        // Delay reset slightly to allow frontend to see 100% state
+        setTimeout(() => {
+          if (this.syncQueue.pending === 0 && this.syncQueue.size === 0) {
+            this.totalFilesInBatch = 0;
+            this.completedFilesInBatch = 0;
+          }
+        }, 2000);
       }
     }
   }
