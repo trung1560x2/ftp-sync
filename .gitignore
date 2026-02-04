@@ -24,7 +24,8 @@ dist-ssr
 *.sln
 *.sw?
 .vite
-.agent/
+.agent/*
+!.agent/workflows/
 release_v4/
 # Local Data
 *.sqlite
