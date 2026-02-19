@@ -110,39 +110,46 @@ class SyncSession {
 
   // Get a free client (or create new one)
   private async acquireClient(): Promise<TransferClient> {
-    // Aggressive check: Loop until we find a working client or run out
+    // Check available pool clients - skip checkConnection for recently-used ones (< 30s idle)
     while (this.availableClients.length > 0) {
-      const client = this.availableClients.shift()!;
+      const entry = this.availableClients.shift()! as any;
+      const client: TransferClient = entry.client || entry;
+      const lastUsed: number = entry.lastUsed || 0;
+      const idleSeconds = (Date.now() - lastUsed) / 1000;
 
-      // Optimization: If client was used recently (< 5s), skip checkConnection
-      // We need to store lastUsed time on client. For now, assume if it's in pool it was working recently?
-      // No, better to check but handle error gracefully.
-      // Let's implement a try-catch ping but slightly less aggressive if we trust the pool logic
+      // If used within last 30s, assume still alive (skip network ping)
+      if (idleSeconds < 30) {
+        if (!client.closed) return client;
+        // closed while in pool - discard and try next
+        try { client.close(); } catch { }
+        this.removeClient(client);
+        continue;
+      }
 
-      // Actually, let's keep checkConnection but if it fails, we just try next.
+      // Idle > 30s: do a quick check to verify still alive
       try {
-        if (await client.checkConnection()) {
-          return client;
-        }
-      } catch (e) { }
+        if (await client.checkConnection()) return client;
+      } catch { }
 
-      // If invalid, ensure it's closed and discard
       try { client.close(); } catch { }
+      this.removeClient(client);
     }
 
-    // Rate Limit Creation: If we are at poolSize, wait?
-    // P-Queue controls concurrency, so here we should be fine to create if strictly needed.
-    // BUT if p-queue has 3 slots, we create 3 clients.
+    // Need to create a new connection
+    if (this.connectionPool.length >= this.poolSize) {
+      // Pool full but all busy - wait a tiny bit and retry (should be rare)
+      await new Promise(r => setTimeout(r, 50));
+      return this.acquireClient();
+    }
 
     const protocol = this.config.protocol || 'ftp';
-    const client = TransferClientFactory.createClient(protocol, 60000); // Higher timeout for reuse
+    const client = TransferClientFactory.createClient(protocol, 60000);
 
-    // Connect immediately
     const password = decrypt(this.config.password_hash);
     if (!password) throw new Error('Cannot decrypt password');
 
-    // Add random jitter to connection start to avoid thundering herd on server
-    await new Promise(r => setTimeout(r, Math.random() * 500));
+    // Small jitter to avoid thundering herd
+    await new Promise(r => setTimeout(r, Math.random() * 100));
 
     await client.connect({
       host: this.config.server,
@@ -166,11 +173,17 @@ class SyncSession {
     if (index !== -1) {
       this.connectionPool.splice(index, 1);
     }
+    // Also remove from available
+    this.availableClients = this.availableClients.filter((e: any) => {
+      const c = e.client || e;
+      return c !== client;
+    }) as any;
   }
 
   private releaseClient(client: TransferClient) {
     if (client && !client.closed) {
-      this.availableClients.push(client);
+      // Store with timestamp so acquireClient can skip checkConnection for fresh clients
+      (this.availableClients as any).push({ client, lastUsed: Date.now() });
     }
   }
 
@@ -658,7 +671,11 @@ class SyncSession {
           this.remoteDirCache.add(remoteDir);
         }
 
-        await client.uploadFrom(localPath, remotePath);
+        const bufferSizeMB = this.config.buffer_size || 16;
+        const readStream = fs.createReadStream(localPath, {
+          highWaterMark: bufferSizeMB * 1024 * 1024
+        });
+        await client.uploadFrom(readStream, remotePath);
 
         try {
           const stats = fs.statSync(localPath);
@@ -1051,41 +1068,76 @@ class SyncSession {
 
   // --- Bulk Sync Implementation ---
 
+  // Pre-warm the connection pool so all slots are ready before transfers start
+  public async warmConnectionPool() {
+    const warmCount = Math.min(this.poolSize, 5); // Warm up to poolSize connections
+    this.log('info', `Pre-warming ${warmCount} connections...`);
+    const warmTasks = Array.from({ length: warmCount }, async (_, i) => {
+      try {
+        // Stagger slightly to avoid hitting server all at once
+        await new Promise(r => setTimeout(r, i * 80));
+        const client = await this.acquireClient();
+        this.releaseClient(client); // Return to pool immediately
+      } catch (e: any) {
+        this.log('error', `Pool warm-up failed for slot ${i}: ${e.message}`);
+      }
+    });
+    await Promise.all(warmTasks);
+    this.log('info', `Connection pool ready (${this.availableClients.length} connections)`);
+  }
+
   public async processBulkSync(items: { path: string, localName?: string | null, direction: 'upload' | 'download', isDirectory: boolean }[], basePath: string) {
-    this.log('info', `Starting bulk sync of ${items.length} items...`);
+    this.log('info', `Starting bulk sync of ${items.length} items (Pool size: ${this.poolSize})...`);
+
+    // Pre-warm connection pool so transfers start immediately without cold-start delay
+    await this.warmConnectionPool();
 
     // Group by action to optimize
     const uploads = items.filter(i => i.direction === 'upload');
     const downloads = items.filter(i => i.direction === 'download');
 
-    // Process Uploads (Async/Background via Queue)
-    // Note: For uploads, use localName to read local file, path (remote name) for destination
+    // Process Uploads - queue ALL files immediately, let PQueue manage concurrency
+    // CRITICAL: Do NOT await queueFileForUpload - it waits for the whole upload to finish!
+    const queuePromises: Promise<void>[] = [];
     for (const item of uploads) {
-      // Use localName if available, fallback to path for reading local files
       const localFileName = item.localName || item.path;
       const fullPath = path.join(this.localRoot, basePath === '/' ? '' : basePath, localFileName);
 
       if (item.isDirectory) {
-        // For directories, we need to handle case-sensitivity in the recursive function
-        await this.queueDirectoryUpload(fullPath);
+        // queueDirectoryUpload returns after scanning & queuing (non-blocking)
+        queuePromises.push(this.queueDirectoryUpload(fullPath));
       } else {
-        await this.queueFileForUpload(fullPath);
+        // Queue the file WITHOUT awaiting the transfer itself
+        this.totalFilesInBatch++;
+        this.log('info', `Queued: ${path.basename(fullPath)}`);
+        this.syncQueue.add(async () => {
+          if (!fs.existsSync(fullPath)) return;
+          await this.uploadFile(fullPath);
+        });
       }
     }
+    // Wait for all directory scans to complete (they queue their own files internally)
+    await Promise.all(queuePromises);
 
-    // Process Downloads (Sequential for now to avoid overwhelming connection)
-    // For downloads we need the full remote path - use item.path (remote name)
+    // Process Downloads in parallel batches (matching pool size for max throughput)
     const remoteRoot = this.config.target_directory || '/';
-
-    for (const item of downloads) {
+    const downloadTasks = downloads.map(item => async () => {
       const relPath = path.posix.join(basePath === '/' ? '' : basePath, item.path);
       const remotePath = path.posix.join(remoteRoot, relPath);
-
-      if (item.isDirectory) {
-        await this.downloadDirectory(remotePath);
-      } else {
-        await this.manualDownload(remotePath);
+      try {
+        if (item.isDirectory) {
+          await this.downloadDirectory(remotePath);
+        } else {
+          await this.manualDownload(remotePath);
+        }
+      } catch (e: any) {
+        this.log('error', `Bulk download failed for ${item.path}: ${e.message}`);
       }
+    });
+
+    const batchSize = Math.max(1, this.poolSize);
+    for (let i = 0; i < downloadTasks.length; i += batchSize) {
+      await Promise.all(downloadTasks.slice(i, i + batchSize).map(t => t()));
     }
   }
 
@@ -1094,19 +1146,51 @@ class SyncSession {
 
     try {
       const items = await fs.readdir(localDirPath);
+      this.log('info', `Scanning folder: ${path.basename(localDirPath)} (${items.length} items)...`);
+      
+      // Process all items in parallel for faster scanning
+      const queuePromises: Promise<void>[] = [];
+      
       for (const item of items) {
         const itemPath = path.join(localDirPath, item);
         const stats = await fs.stat(itemPath);
 
         if (stats.isDirectory()) {
-          await this.queueDirectoryUpload(itemPath);
+          // Recursively queue subdirectory (await to ensure all files are counted)
+          queuePromises.push(this.queueDirectoryUpload(itemPath));
         } else {
-          await this.queueFileForUpload(itemPath);
+          // Queue file WITHOUT awaiting - just add to PQueue
+          this.queueFileForUploadNonBlocking(itemPath);
         }
       }
+      
+      // Wait for all subdirectory scans to complete
+      await Promise.all(queuePromises);
+      this.log('info', `Finished scanning: ${path.basename(localDirPath)}`);
     } catch (err: any) {
       this.log('error', `Failed to queue directory ${path.basename(localDirPath)}: ${err.message}`);
     }
+  }
+
+  // Non-blocking version that doesn't return the upload promise
+  private queueFileForUploadNonBlocking(localPath: string): void {
+    // Check ignore patterns synchronously if possible, or skip check for speed
+    // For now, we'll do async check but not await it
+    shouldIgnore(this.localRoot, localPath).then(ignored => {
+      if (ignored) {
+        this.log('info', `Ignored (upload): ${path.basename(localPath)}`);
+        return;
+      }
+
+      this.totalFilesInBatch++;
+      this.log('info', `Queued: ${path.basename(localPath)}`);
+
+      // Add to p-queue but DON'T return the promise
+      this.syncQueue.add(async () => {
+        if (!fs.existsSync(localPath)) return;
+        await this.uploadFile(localPath);
+      });
+    });
   }
 
   private async downloadDirectory(remoteDirPath: string) {
@@ -1118,14 +1202,20 @@ class SyncSession {
 
       this.log('info', `Found ${files.length} files in ${path.basename(remoteDirPath)}`);
 
-      for (const file of files) {
-        try {
-          await this.manualDownload(file.path);
-        } catch (e: any) {
-          this.log('error', `Failed to download file ${file.name}: ${e.message}`);
-          // Continue to next file
-        }
-      }
+      // Queue all files for parallel download instead of sequential
+      // Each file will be processed by PQueue with concurrency control
+      const downloadPromises = files.map(file => 
+        this.syncQueue.add(async () => {
+          try {
+            await this.manualDownload(file.path);
+          } catch (e: any) {
+            this.log('error', `Failed to download file ${file.name}: ${e.message}`);
+          }
+        })
+      );
+
+      // Wait for all downloads to complete
+      await Promise.all(downloadPromises);
     } catch (err: any) {
       this.log('error', `Failed to download directory ${path.basename(remoteDirPath)}: ${err.message}`);
     }
@@ -1233,6 +1323,11 @@ class SyncManager {
   public async manualDownload(connectionId: number, remotePath: string) {
     const session = await this.getSession(connectionId);
     await session.manualDownload(remotePath);
+  }
+
+  public async ensureConnected(connectionId: number) {
+    const session = await this.getSession(connectionId);
+    await session.warmConnectionPool();
   }
 
   public async processBulkSync(connectionId: number, items: { path: string, localName?: string | null, direction: 'upload' | 'download', isDirectory: boolean }[], basePath: string) {

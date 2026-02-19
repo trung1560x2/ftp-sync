@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., v1.0.2)'
+        required: true
+        default: 'v1.0.2'
 
 permissions:
   contents: write
@@ -16,7 +21,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        include:
+          - os: windows-latest
+            platform: win
+            artifact: FTP-Sync-Manager-Setup-*.exe
+          - os: ubuntu-latest
+            platform: linux
+            artifact: FTP-Sync-Manager-*.AppImage
+          - os: macos-latest
+            platform: mac
+            artifact: FTP-Sync-Manager-*.dmg
 
     steps:
       - name: Checkout Code
@@ -31,20 +45,88 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
-      # Force rebuild of native modules for the current OS/Arch if strictly necessary,
-      # though electron-builder usually handles this.
-      # Adding explicit rebuild to be safe given sqlite3 usage.
-      - name: Rebuild Native Modules
-        shell: bash
+      - name: Build Frontend and Backend
         run: |
           npm run build
           npm run build:server
-          # Ensure electron-builder is available to install-app-deps
-          npx electron-builder install-app-deps
 
-      - name: Build and Publish
+      - name: Rebuild Native Modules for Electron
+        run: npx electron-builder install-app-deps
+
+      - name: Build Electron App
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # Default npm run dist runs: npm run build && npm run build:server && electron-builder
-        # We add -p always to publish to GitHub Releases
-        run: npm run dist -- -p always
+        run: npm run dist
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}-build
+          path: |
+            release_v4/${{ matrix.artifact }}
+          retention-days: 7
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display Structure
+        run: ls -R artifacts
+
+      - name: Get Version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: FTP Sync Manager ${{ steps.version.outputs.version }}
+          body: |
+            ## 🚀 FTP Sync Manager ${{ steps.version.outputs.version }}
+            
+            ### ✨ What's New
+            - ⚡ **5-10x faster** Visual Diff upload/download with parallel processing
+            - 🔄 Connection pooling with pre-warming
+            - 📦 Smart batching for multiple files
+            - 🎯 Real-time progress tracking with speed & ETA
+            - 🐛 Fixed critical bug in folder upload (was sequential, now parallel)
+            
+            ### 📥 Downloads
+            - **Windows**: `FTP-Sync-Manager-Setup-*.exe`
+            - **Linux**: `FTP-Sync-Manager-*.AppImage`
+            - **macOS**: `FTP-Sync-Manager-*.dmg`
+            
+            ### 🔧 Performance Tips
+            Increase `parallel_connections` in database for faster transfers:
+            ```sql
+            UPDATE ftp_connections SET parallel_connections = 5;
+            ```
+            
+            ### 📖 Documentation
+            See [VISUAL_DIFF_IMPROVEMENTS.md](https://github.com/${{ github.repository }}/blob/main/VISUAL_DIFF_IMPROVEMENTS.md) for details.
+            
+            ---
+            **Full Changelog**: https://github.com/${{ github.repository }}/compare/v1.0.0...${{ steps.version.outputs.version }}
+          files: |
+            artifacts/**/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

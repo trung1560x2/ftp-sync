@@ -41,6 +41,8 @@ router.post('/upload-file', async (req: Request, res: Response) => {
   try {
     // filename: local file name (e.g., 'http' on Windows)
     // remoteName: optional, the name to use on remote server (e.g., 'Http' on Linux)
+    // Pre-warm connection pool for faster transfer
+    await syncManager.ensureConnected(id);
     await syncManager.manualUpload(id, filename, remoteName);
     res.json({ success: true, message: 'File uploaded' });
   } catch (error: any) {
@@ -51,6 +53,8 @@ router.post('/upload-file', async (req: Request, res: Response) => {
 router.post('/download-file', async (req: Request, res: Response) => {
   const { id, remotePath } = req.body;
   try {
+    // Pre-warm connection pool for faster transfer
+    await syncManager.ensureConnected(id);
     await syncManager.manualDownload(id, remotePath);
     res.json({ success: true, message: 'File downloaded' });
   } catch (error: any) {

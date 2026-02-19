@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { X, RefreshCw, ArrowLeft, Folder, File, ArrowRight, Upload, Download, AlertCircle, CheckCircle, Smartphone, Monitor, Eye, Search } from 'lucide-react';
 import ContentDiffModal from './ContentDiffModal';
 
@@ -31,6 +31,20 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose })
     const [contentDiffFile, setContentDiffFile] = useState<{ remotePath: string; fileName: string } | null>(null);
     const [recursive, setRecursive] = useState(false);
 
+    // Queue for accumulating single-file clicks
+    const pendingItemsRef = useRef<{ path: string; localName: string | null; direction: 'upload' | 'download'; isDirectory: boolean }[]>([]);
+    const batchTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const [pendingCount, setPendingCount] = useState(0);
+
+
+    // Cleanup timer on unmount
+    useEffect(() => {
+        return () => {
+            if (batchTimerRef.current) {
+                clearTimeout(batchTimerRef.current);
+            }
+        };
+    }, []);
 
     const fetchDiff = async (path?: string) => {
         setLoading(true);
@@ -72,45 +86,53 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose })
 
     const handleSyncItem = async (item: DiffItem, direction: 'upload' | 'download') => {
         if (item.isDirectory) return;
-        setProcessing(item.name);
+        
+        // Add to pending queue
+        pendingItemsRef.current.push({
+            path: item.name,
+            localName: item.localName,
+            direction: direction,
+            isDirectory: false
+        });
 
-        try {
-            if (direction === 'upload') {
-                // Upload: Construct full relative path for local lookup and remote destination
-                // SyncService.manualUpload joins filename with localRoot
-                const name = item.localName || item.name;
-                // Remove leading slash from currentPath if present for cleaner join
-                const cleanBase = currentPath === '/' ? '' : (currentPath.startsWith('/') ? currentPath.substring(1) : currentPath);
+        // Update pending count for UI
+        setPendingCount(pendingItemsRef.current.length);
 
-                const localFilename = cleanBase ? `${cleanBase}/${name}` : name;
-                const remoteRelPath = cleanBase ? `${cleanBase}/${item.name}` : item.name;
+        // Clear existing timer
+        if (batchTimerRef.current) {
+            clearTimeout(batchTimerRef.current);
+        }
 
-                await fetch('/api/sync/upload-file', {
+        // Set processing state immediately
+        if (!processing) {
+            setProcessing('batch');
+        }
+
+        // Increased debounce: wait 2 seconds for more clicks, then send batch
+        // This allows users to click multiple files before batch is sent
+        batchTimerRef.current = setTimeout(async () => {
+            const itemsToSync = [...pendingItemsRef.current];
+            pendingItemsRef.current = [];
+            setPendingCount(0);
+
+            if (itemsToSync.length === 0) return;
+
+            try {
+                await fetch('/api/sync/bulk', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         id: connectionId,
-                        filename: localFilename, // Pass full relative path
-                        remoteName: remoteRelPath
+                        items: itemsToSync,
+                        basePath: currentPath
                     })
                 });
-            } else {
-                // Download: Use remote name (item.name) for source path
-                const remotePath = currentPath === '/' ? `/${item.name}` : `${currentPath}/${item.name}`;
-                await fetch('/api/sync/download-file', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ id: connectionId, remotePath })
-                });
+                // Progress polling will handle the rest
+            } catch (err) {
+                console.error('Sync action failed', err);
+                setProcessing(null);
             }
-
-            // Refresh after action
-            setTimeout(() => fetchDiff(currentPath), 1000);
-        } catch (err) {
-            console.error('Sync action failed', err);
-        } finally {
-            setProcessing(null);
-        }
+        }, 2000); // Increased from 300ms to 2000ms
     };
 
     const getStatusColor = (status: string) => {
@@ -186,67 +208,86 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose })
         completedFiles: number;
     } | null>(null);
 
-    // Polling for progress
+    // Refs to persist across re-renders without triggering useEffect restarts
+    const completionTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const isCompletingRef = useRef(false);
+    const processingRef = useRef(processing);
+    processingRef.current = processing;
+    const currentPathRef = useRef(currentPath);
+    currentPathRef.current = currentPath;
+
+    // Polling for progress - only depends on processing state (NOT overallProgress)
+    // This prevents the infinite loop: fetchDiff → loading=true → useEffect restart → poll again
     useEffect(() => {
-        let pollTimer: NodeJS.Timeout;
-        let completionTimerRef: NodeJS.Timeout | null = null;
+        if (!processing) return;
 
-        if (loading || processing || overallProgress) {
-            pollTimer = setInterval(async () => {
-                try {
-                    const res = await fetch(`/api/sync/progress/${connectionId}`);
-                    const data = await res.json();
+        const pollTimer = setInterval(async () => {
+            try {
+                const res = await fetch(`/api/sync/progress/${connectionId}`);
+                const data = await res.json();
 
-                    // If we're in batch mode and haven't shown the modal yet, show it immediately
-                    // This handles the "scanning folder" state
-                    if (processing === 'batch' && !overallProgress) {
-                        setOverallProgress({
-                            activeUploads: [],
-                            queueLength: 0,
-                            totalFilesInBatch: 0,
-                            completedFiles: 0
-                        });
-                    }
+                // Show modal immediately when batch starts
+                if (processingRef.current === 'batch') {
+                    const hasActivity = data.activeUploads.length > 0 || data.queueLength > 0 || data.totalFilesInBatch > 0;
 
-                    // Check for actual completion first
-                    const isComplete = data.activeUploads.length === 0 &&
-                        data.queueLength === 0 &&
-                        (data.totalFilesInBatch === 0 ||
-                            (data.totalFilesInBatch > 0 && data.completedFiles >= data.totalFilesInBatch));
-
-                    // Only update if there is active activity or we are expecting it
-                    if (data.activeUploads.length > 0 || data.queueLength > 0 || data.totalFilesInBatch > 0) {
+                    if (hasActivity) {
                         setOverallProgress(data);
 
-                        // Clear any pending completion timer ONLY if we're not complete
-                        if (!isComplete && completionTimerRef) {
-                            clearTimeout(completionTimerRef);
-                            completionTimerRef = null;
-                        }
-                    }
+                        const isComplete = data.activeUploads.length === 0 &&
+                            data.queueLength === 0 &&
+                            data.totalFilesInBatch > 0 &&
+                            data.completedFiles >= data.totalFilesInBatch;
 
-                    if (isComplete && overallProgress) {
-                        // If completed, wait a moment to show 100% then close
-                        if (!completionTimerRef) {
-                            completionTimerRef = setTimeout(() => {
+                        if (!isComplete && completionTimerRef.current) {
+                            clearTimeout(completionTimerRef.current);
+                            completionTimerRef.current = null;
+                            isCompletingRef.current = false;
+                        }
+
+                        if (isComplete && !isCompletingRef.current) {
+                            isCompletingRef.current = true;
+                            completionTimerRef.current = setTimeout(() => {
                                 setOverallProgress(null);
                                 setProcessing(null);
-                                fetchDiff(currentPath);
+                                // fetchDiff after a small extra delay so processing=null clears first
+                                setTimeout(() => fetchDiff(currentPathRef.current), 100);
                                 setSelectedItems(new Set());
+                                completionTimerRef.current = null;
+                                isCompletingRef.current = false;
                             }, 1500);
                         }
+                    } else if (!isCompletingRef.current) {
+                        // No activity - either not started yet (show scanning) or done (counters reset)
+                        setOverallProgress(prev => {
+                            if (!prev) {
+                                // Not started yet - show scanning state
+                                return { activeUploads: [], queueLength: 0, totalFilesInBatch: 0, completedFiles: 0 };
+                            }
+                            // Had progress before, now empty = server reset counters = done
+                            if (!isCompletingRef.current) {
+                                isCompletingRef.current = true;
+                                completionTimerRef.current = setTimeout(() => {
+                                    setOverallProgress(null);
+                                    setProcessing(null);
+                                    setTimeout(() => fetchDiff(currentPathRef.current), 100);
+                                    setSelectedItems(new Set());
+                                    completionTimerRef.current = null;
+                                    isCompletingRef.current = false;
+                                }, 500);
+                            }
+                            return prev; // Keep showing last progress while timer runs
+                        });
                     }
-                } catch (e) {
-                    console.error("Poll failed", e);
                 }
-            }, 500);
-        }
+            } catch (e) {
+                console.error('Poll failed', e);
+            }
+        }, 200);
 
         return () => {
-            if (pollTimer) clearInterval(pollTimer);
-            if (completionTimerRef) clearTimeout(completionTimerRef);
-        }
-    }, [connectionId, loading, processing, overallProgress, currentPath]);
+            clearInterval(pollTimer);
+        };
+    }, [connectionId, processing]);
 
 
     const [confirmModal, setConfirmModal] = useState<{
@@ -382,6 +423,41 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose })
                                         Download ({selectedItems.size})
                                     </button>
                                 </div>
+                            )}
+
+                            {pendingCount > 0 && (
+                                <button
+                                    onClick={() => {
+                                        // Force send batch immediately
+                                        if (batchTimerRef.current) {
+                                            clearTimeout(batchTimerRef.current);
+                                            batchTimerRef.current = null;
+                                        }
+                                        
+                                        const itemsToSync = [...pendingItemsRef.current];
+                                        pendingItemsRef.current = [];
+                                        setPendingCount(0);
+
+                                        if (itemsToSync.length > 0) {
+                                            fetch('/api/sync/bulk', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({
+                                                    id: connectionId,
+                                                    items: itemsToSync,
+                                                    basePath: currentPath
+                                                })
+                                            }).catch(err => {
+                                                console.error('Sync action failed', err);
+                                                setProcessing(null);
+                                            });
+                                        }
+                                    }}
+                                    className="bg-orange-600 hover:bg-orange-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition-colors shadow-sm flex items-center animate-pulse"
+                                >
+                                    <Upload size={14} className="mr-1.5" />
+                                    Send Queue ({pendingCount})
+                                </button>
                             )}
                         </div>
 
