@@ -62,9 +62,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}-build
-          path: |
-            release_v4/${{ matrix.artifact }}
+          path: release_v4/*
+          if-no-files-found: warn
           retention-days: 7
+
+      - name: List Release Files (Debug)
+        run: |
+          echo "Contents of release_v4:"
+          ls -la release_v4/ || echo "release_v4 directory not found"
 
   release:
     name: Create GitHub Release
@@ -81,8 +86,20 @@ jobs:
         with:
           path: artifacts
 
-      - name: Display Structure
-        run: ls -R artifacts
+      - name: Display Structure (Debug)
+        run: |
+          echo "=== Artifacts Structure ==="
+          ls -R artifacts/
+          echo "=== Finding all files ==="
+          find artifacts/ -type f
+
+      - name: Prepare Release Files
+        run: |
+          mkdir -p release-files
+          # Copy all files from artifacts to release-files
+          find artifacts/ -type f \( -name "*.exe" -o -name "*.AppImage" -o -name "*.dmg" \) -exec cp {} release-files/ \;
+          echo "=== Release Files ==="
+          ls -la release-files/
 
       - name: Get Version
         id: version
@@ -108,10 +125,14 @@ jobs:
             - 🎯 Real-time progress tracking with speed & ETA
             - 🐛 Fixed critical bug in folder upload (was sequential, now parallel)
             
-            ### 📥 Downloads
-            - **Windows**: `FTP-Sync-Manager-Setup-*.exe`
-            - **Linux**: `FTP-Sync-Manager-*.AppImage`
-            - **macOS**: `FTP-Sync-Manager-*.dmg`
+            ### � Downloads
+            Choose the installer for your platform:
+            
+            | Platform | File |
+            |----------|------|
+            | 🪟 Windows | `FTP-Sync-Manager-Setup-*.exe` |
+            | 🐧 Linux | `FTP-Sync-Manager-*.AppImage` |
+            | 🍎 macOS | `FTP-Sync-Manager-*.dmg` |
             
             ### 🔧 Performance Tips
             Increase `parallel_connections` in database for faster transfers:
@@ -120,13 +141,15 @@ jobs:
             ```
             
             ### 📖 Documentation
-            See [VISUAL_DIFF_IMPROVEMENTS.md](https://github.com/${{ github.repository }}/blob/main/VISUAL_DIFF_IMPROVEMENTS.md) for details.
+            - [Performance Improvements](https://github.com/${{ github.repository }}/blob/main/VISUAL_DIFF_IMPROVEMENTS.md)
+            - [Release Guide](https://github.com/${{ github.repository }}/blob/main/RELEASE_GUIDE.md)
+            - [Changelog](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
             
             ---
             **Full Changelog**: https://github.com/${{ github.repository }}/compare/v1.0.0...${{ steps.version.outputs.version }}
-          files: |
-            artifacts/**/*
+          files: release-files/*
           draft: false
           prerelease: false
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
