@@ -62,11 +62,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}-build
-          path: release_v4/*
+          path: release_v4/
           if-no-files-found: warn
           retention-days: 7
 
       - name: List Release Files (Debug)
+        shell: bash
         run: |
           echo "Contents of release_v4:"
           ls -la release_v4/ || echo "release_v4 directory not found"
