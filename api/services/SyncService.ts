@@ -9,6 +9,7 @@ import { logStore } from './LogStore.js';
 import { shouldIgnore, clearIgnoreCache } from './IgnoreService.js';
 import { TransferClient } from './transfer/TransferClient.js';
 import { SimpleMutex } from '../utils/SimpleMutex.js';
+import { EventEmitter } from 'events';
 
 interface SyncLog {
   timestamp: string;
@@ -32,6 +33,12 @@ interface OverallProgress {
   queueLength: number;
   totalFilesInBatch: number;
   completedFiles: number;
+  filesUploaded: number;
+  filesSkipped: number;
+  filesDeleted: number;
+  filesFailed: number;
+  uploadSpeedMBps: number;
+  downloadSpeedMBps: number;
 }
 
 class SyncSession {
@@ -74,11 +81,73 @@ class SyncSession {
   // Logs
   private logs: SyncLog[] = [];
 
+  // Sessionization properties
+  private activeSession: any = null;
+  private sessionStartTime = 0;
+  private sessionCloseTimer: NodeJS.Timeout | null = null;
+
   public connectionId: number;
   public config: any;
   public localRoot: string;
   private pendingDownloads: Set<string> = new Set();
   private isSyncing = false;
+  public isLocalCacheWarmed = false;
+
+  // Progress counters
+  private filesUploaded = 0;
+  private filesSkipped = 0;
+  private filesDeleted = 0;
+  private filesFailed = 0;
+  private batchStartTime = 0;
+
+  // Sliding window for speed tracking
+  private uploadWindow: { time: number; bytes: number }[] = [];
+  private downloadWindow: { time: number; bytes: number }[] = [];
+
+  private recordWindowBytes(bytes: number, type: 'upload' | 'download') {
+    const now = Date.now();
+    if (type === 'upload') {
+      this.uploadWindow.push({ time: now, bytes });
+    } else {
+      this.downloadWindow.push({ time: now, bytes });
+    }
+    this.cleanWindows(now);
+  }
+
+  private cleanWindows(now: number) {
+    const threshold = now - 2000; // 2 seconds window
+    this.uploadWindow = this.uploadWindow.filter(p => p.time > threshold);
+    this.downloadWindow = this.downloadWindow.filter(p => p.time > threshold);
+  }
+
+  private getWindowSpeed(type: 'upload' | 'download'): number {
+    const now = Date.now();
+    this.cleanWindows(now);
+    const window = type === 'upload' ? this.uploadWindow : this.downloadWindow;
+    if (window.length === 0) return 0;
+    
+    const totalBytes = window.reduce((sum, p) => sum + p.bytes, 0);
+    const speedMBps = (totalBytes / (1024 * 1024)) / 2.0; // average over 2 seconds
+    return Math.round(speedMBps * 100) / 100;
+  }
+
+  public onProgress?: (progress: OverallProgress) => void;
+
+  private notifyProgress() {
+    if (this.onProgress) {
+      this.onProgress(this.getProgress());
+    }
+  }
+
+  public getFilesUploaded() { return this.filesUploaded; }
+  public getFilesSkipped() { return this.filesSkipped; }
+  public getFilesDeleted() { return this.filesDeleted; }
+  public getFilesFailed() { return this.filesFailed; }
+  public getIsSyncing() { return this.isSyncing || this.syncQueue.pending > 0 || this.syncQueue.size > 0; }
+  public getLastSyncStatus() {
+    return this.filesFailed > 0 ? 'failed' : 'success';
+  }
+  public isCacheWarmed(): boolean { return this.isLocalCacheWarmed; }
 
   constructor(connectionId: number, config: any) {
     this.connectionId = connectionId;
@@ -105,6 +174,136 @@ class SyncSession {
       this.localRoot = this.config.local_path.replace(/^['"]|['"]$/g, '');
     } else {
       this.localRoot = path.resolve(process.cwd(), 'sync_data', this.connectionId.toString().replace(/^['"]|['"]$/g, ''));
+    }
+  }
+
+  public async runWithClient<T>(fn: (client: TransferClient) => Promise<T>, isInteractive = false): Promise<T> {
+    if (isInteractive) {
+      return this.mutex.run(async () => {
+        await this.ensureConnection();
+        return fn(this.client);
+      });
+    } else {
+      const client = await this.acquireClient();
+      try {
+        return await fn(client);
+      } finally {
+        this.releaseClient(client);
+      }
+    }
+  }
+
+  private async updateLocalCache(localPath: string) {
+    try {
+      const db = await getDb();
+      const relPath = path.relative(this.localRoot, localPath).replace(/\\/g, '/');
+      const stats = await fs.stat(localPath);
+      await db.run(
+        `INSERT OR REPLACE INTO local_file_cache 
+         (connection_id, rel_path, name, is_directory, size, modified_at) 
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        this.connectionId,
+        relPath,
+        path.basename(localPath),
+        stats.isDirectory() ? 1 : 0,
+        stats.size,
+        stats.mtime.toISOString()
+      );
+    } catch (err) {
+      // Ignore
+    }
+  }
+
+  private async deleteFromLocalCache(localPath: string) {
+    try {
+      const db = await getDb();
+      const relPath = path.relative(this.localRoot, localPath).replace(/\\/g, '/');
+      await db.run(
+        'DELETE FROM local_file_cache WHERE connection_id = ? AND rel_path = ?',
+        this.connectionId,
+        relPath
+      );
+    } catch (err) {
+      // Ignore
+    }
+  }
+
+  private async indexLocalFiles() {
+    this.log('info', 'Starting local file cache indexing...');
+    const tStart = Date.now();
+    try {
+      const db = await getDb();
+      await db.run('DELETE FROM local_file_cache WHERE connection_id = ?', this.connectionId);
+
+      const filesToIndex: Array<{ relPath: string, name: string, isDirectory: number, size: number, modifiedAt: string }> = [];
+
+      const scanDir = async (currentDir: string) => {
+        if (!fs.existsSync(currentDir)) return;
+        const entries = await fs.readdir(currentDir, { withFileTypes: true });
+        for (const entry of entries) {
+          const fullPath = path.join(currentDir, entry.name);
+          if (await shouldIgnore(this.localRoot, fullPath)) {
+            continue;
+          }
+          const relPath = path.relative(this.localRoot, fullPath).replace(/\\/g, '/');
+          const isDir = entry.isDirectory();
+          let size = 0;
+          let modifiedAt = new Date().toISOString();
+          try {
+            const stat = await fs.stat(fullPath);
+            size = stat.size;
+            modifiedAt = stat.mtime.toISOString();
+          } catch (e) {
+            // ignore stat errors
+          }
+
+          filesToIndex.push({
+            relPath,
+            name: entry.name,
+            isDirectory: isDir ? 1 : 0,
+            size,
+            modifiedAt
+          });
+
+          if (isDir) {
+            await scanDir(fullPath);
+          }
+        }
+      };
+
+      await scanDir(this.localRoot);
+
+      // Perform batch insert inside a single transaction for maximum speed
+      if (filesToIndex.length > 0) {
+        await db.run('BEGIN TRANSACTION');
+        try {
+          const stmt = await db.prepare(
+            `INSERT OR REPLACE INTO local_file_cache 
+             (connection_id, rel_path, name, is_directory, size, modified_at) 
+             VALUES (?, ?, ?, ?, ?, ?)`
+          );
+          for (const file of filesToIndex) {
+            await stmt.run(
+              this.connectionId,
+              file.relPath,
+              file.name,
+              file.isDirectory,
+              file.size,
+              file.modifiedAt
+            );
+          }
+          await stmt.finalize();
+          await db.run('COMMIT');
+        } catch (err) {
+          await db.run('ROLLBACK');
+          throw err;
+        }
+      }
+
+      this.isLocalCacheWarmed = true;
+      this.log('success', `Local file cache indexed successfully (${filesToIndex.length} items in ${Date.now() - tStart}ms)`);
+    } catch (err: any) {
+      this.log('error', `Local file cache indexing failed: ${err.message}`);
     }
   }
 
@@ -195,7 +394,13 @@ class SyncSession {
     }
 
     this.totalFilesInBatch++;
+    this.notifyProgress();
     this.log('info', `Queued: ${path.basename(localPath)}`);
+
+    try {
+      const stats = await fs.stat(localPath);
+      await this.addToQueueDb(localPath, 'upload', stats.size);
+    } catch (e) {}
 
     // Add to p-queue and return the promise so we can await it if needed
     return this.syncQueue.add(async () => {
@@ -211,57 +416,40 @@ class SyncSession {
     const startTime = Date.now();
     const taskId = Date.now().toString() + Math.random().toString(36).substr(2, 9);
     let client: TransferClient | null = null;
+    let offset = 0;
+    const remotePath = this.toRemotePath(localPath, this.localRoot);
 
+    this.startSession();
     try {
       if (!fs.existsSync(localPath)) {
         this.log('error', `File not found: ${filename}`);
+        this.addFileToSession(filename, remotePath, 0, 'upload', 'failed', 'File not found locally');
         return;
       }
 
       const stats = await fs.stat(localPath);
       const totalBytes = stats.size;
 
+      // Ensure task is recorded in DB queue
+      const db = await getDb();
+      const queuedTask = await db.get(
+        'SELECT status, bytes_transferred FROM sync_transfer_queue WHERE connection_id = ? AND file_path = ?',
+        this.connectionId,
+        localPath
+      );
+
+      if (!queuedTask) {
+        await this.addToQueueDb(localPath, 'upload', totalBytes);
+      } else if (queuedTask.status === 'interrupted') {
+        // If it was interrupted, we will check if we can resume
+        await this.updateQueueStatusDb(localPath, 'syncing', queuedTask.bytes_transferred);
+      } else {
+        await this.updateQueueStatusDb(localPath, 'syncing', 0);
+      }
+
       // Acquire Client
       client = await this.acquireClient();
 
-      // Initialize progress
-      this.uploadProgress.set(taskId, {
-        type: 'upload',
-        filename,
-        totalBytes,
-        bytesTransferred: 0,
-        percent: 0,
-        speedMBps: 0,
-        etaSeconds: 0,
-        startTime
-      });
-
-      // Throttled progress tracking
-      let lastProgressUpdate = 0;
-      client.trackProgress((info) => {
-        const now = Date.now();
-        if (now - lastProgressUpdate < 200) return;
-        lastProgressUpdate = now;
-
-        const elapsed = (now - startTime) / 1000;
-        const speedBps = elapsed > 0 ? info.bytes / elapsed : 0;
-        const speedMBps = speedBps / (1024 * 1024);
-        const percent = totalBytes > 0 ? Math.round((info.bytes / totalBytes) * 100) : 0;
-        const remainingBytes = totalBytes - info.bytes;
-
-        this.uploadProgress.set(taskId, {
-          type: 'upload',
-          filename,
-          totalBytes,
-          bytesTransferred: info.bytes,
-          percent,
-          speedMBps: Math.round(speedMBps * 100) / 100,
-          etaSeconds: speedBps > 0 ? Math.round(remainingBytes / speedBps) : 0,
-          startTime
-        });
-      });
-
-      const remotePath = this.toRemotePath(localPath, this.localRoot);
       const remoteDir = path.posix.dirname(remotePath);
 
       // Check dir cache
@@ -270,12 +458,80 @@ class SyncSession {
         this.remoteDirCache.add(remoteDir);
       }
 
+      // Check if we should resume (only if it was marked interrupted)
+      if (queuedTask && queuedTask.status === 'interrupted') {
+        try {
+          const remoteStats = await client.stat(remotePath);
+          if (remoteStats && remoteStats.size > 0 && remoteStats.size < totalBytes) {
+            offset = remoteStats.size;
+            this.log('info', `Resuming upload for ${filename} at offset ${offset} bytes (${Math.round((offset/totalBytes)*100)}% done)`);
+          }
+        } catch (e) {
+          // If stat fails, we just upload from the beginning
+        }
+      }
+
+      // Initialize progress
+      this.uploadProgress.set(taskId, {
+        type: 'upload',
+        filename,
+        totalBytes,
+        bytesTransferred: offset,
+        percent: totalBytes > 0 ? Math.round((offset / totalBytes) * 100) : 0,
+        speedMBps: 0,
+        etaSeconds: 0,
+        startTime
+      });
+      this.notifyProgress();
+
+      // Throttled progress tracking
+      let lastProgressUpdate = 0;
+      let lastDbUpdate = Date.now();
+      client.trackProgress((info) => {
+        const now = Date.now();
+        if (now - lastProgressUpdate < 200) return;
+        lastProgressUpdate = now;
+
+        const currentTransferred = info.bytes + offset;
+        const elapsed = (now - startTime) / 1000;
+        const speedBps = elapsed > 0 ? info.bytes / elapsed : 0;
+        const speedMBps = speedBps / (1024 * 1024);
+        const percent = totalBytes > 0 ? Math.min(100, Math.round((currentTransferred / totalBytes) * 100)) : 0;
+        const remainingBytes = Math.max(0, totalBytes - currentTransferred);
+
+        // Record delta to window
+        const prevProgress = this.uploadProgress.get(taskId);
+        const prevBytes = prevProgress ? prevProgress.bytesTransferred : offset;
+        const delta = currentTransferred - prevBytes;
+        if (delta > 0) {
+          this.recordWindowBytes(delta, 'upload');
+        }
+
+        this.uploadProgress.set(taskId, {
+          type: 'upload',
+          filename,
+          totalBytes,
+          bytesTransferred: currentTransferred,
+          percent,
+          speedMBps: Math.round(speedMBps * 100) / 100,
+          etaSeconds: speedBps > 0 ? Math.round(remainingBytes / speedBps) : 0,
+          startTime
+        });
+        this.notifyProgress();
+
+        // Throttle database progress updates to every 2 seconds
+        if (now - lastDbUpdate > 2000) {
+          lastDbUpdate = now;
+          this.updateQueueStatusDb(localPath, 'syncing', currentTransferred);
+        }
+      });
+
       // Conflict Resolution
       const conflictResolution = this.config.conflict_resolution || 'overwrite';
       let shouldUpload = true;
       let skipReason = '';
 
-      if (conflictResolution !== 'overwrite') {
+      if (offset === 0 && conflictResolution !== 'overwrite') {
         try {
           const remoteStats = await client.stat(remotePath);
           if (remoteStats) {
@@ -298,18 +554,37 @@ class SyncSession {
       if (shouldUpload) {
         const bufferSizeMB = this.config.buffer_size || 16;
         const readStream = fs.createReadStream(localPath, {
+          start: offset,
           highWaterMark: bufferSizeMB * 1024 * 1024
         });
-        await client.uploadFrom(readStream, remotePath);
-        this.log('success', `Uploaded: ${filename}`);
+        await client.uploadFrom(readStream, remotePath, { localStart: offset });
 
-        try { await this.recordTransfer(stats.size, 'upload'); } catch { }
+        // Record final remaining bytes to window
+        const prevProgress = this.uploadProgress.get(taskId);
+        const prevBytes = prevProgress ? prevProgress.bytesTransferred : offset;
+        const remainingDelta = stats.size - prevBytes;
+        if (remainingDelta > 0) {
+          this.recordWindowBytes(remainingDelta, 'upload');
+        }
+
+        this.log('success', `Uploaded${offset > 0 ? ' (Resumed)' : ''}: ${filename}`);
+        this.filesUploaded++;
+
+        try { await this.recordTransfer(stats.size - offset, 'upload'); } catch { }
+        await this.removeFromQueueDb(localPath);
+        this.addFileToSession(filename, remotePath, stats.size, 'upload', 'success');
       } else {
         this.log('info', `Skipped: ${filename} (${skipReason})`);
+        this.filesSkipped++;
+        await this.removeFromQueueDb(localPath);
+        this.addFileToSession(filename, remotePath, stats.size, 'upload', 'skipped', skipReason);
       }
 
     } catch (err: any) {
       this.log('error', `Failed: ${filename} - ${err.message}`);
+      this.filesFailed++;
+      await this.updateQueueStatusDb(localPath, 'failed', offset);
+      this.addFileToSession(filename, remotePath, 0, 'upload', 'failed', err.message);
       // Aggressive Cleanup: On ANY error, assume the worst and drop the client
       if (client) {
         try { client.close(); } catch { }
@@ -341,6 +616,7 @@ class SyncSession {
           client = null; // Prevent finally from releasing it
         }
         this.uploadProgress.delete(taskId);
+        this.notifyProgress();
 
         // Add random delay to avoid Thundering Herd on server limits
         await new Promise(resolve => setTimeout(resolve, delay));
@@ -368,8 +644,9 @@ class SyncSession {
         this.completedFilesInBatch = this.totalFilesInBatch;
       }
 
+      this.notifyProgress();
+
       // Only reset counters when all queued work is done AND completed equals total
-      // This prevents premature reset during folder scanning
       if (this.syncQueue.pending === 0 && this.syncQueue.size === 0 &&
         this.completedFilesInBatch >= this.totalFilesInBatch && this.totalFilesInBatch > 0) {
         // Delay reset slightly to allow frontend to see 100% state
@@ -377,9 +654,15 @@ class SyncSession {
           if (this.syncQueue.pending === 0 && this.syncQueue.size === 0) {
             this.totalFilesInBatch = 0;
             this.completedFilesInBatch = 0;
+            this.filesUploaded = 0;
+            this.filesSkipped = 0;
+            this.filesDeleted = 0;
+            this.filesFailed = 0;
+            this.notifyProgress();
           }
         }, 2000);
       }
+      this.debounceCloseSession();
     }
   }
 
@@ -492,6 +775,22 @@ class SyncSession {
     } catch (e) {
       console.error('Failed to save log to LogStore', e);
     }
+
+    // Persist to flat text log file (fire and forget)
+    try {
+      const logDir = path.resolve(process.cwd(), 'sync_data', 'logs');
+      fs.ensureDir(logDir)
+        .then(() => {
+          const logFile = path.join(logDir, `connection_${this.connectionId}.log`);
+          const logLine = `[${logEntry.timestamp}] [${type.toUpperCase()}] ${message}\n`;
+          return fs.appendFile(logFile, logLine);
+        })
+        .catch(err => {
+          console.error('Failed to append to log file', err);
+        });
+    } catch (e) {
+      console.error('Failed to write to text log file', e);
+    }
   }
 
   private async recordTransfer(bytes: number, direction: 'upload' | 'download') {
@@ -499,6 +798,113 @@ class SyncSession {
       logStore.addTransferStat(this.connectionId, bytes, direction);
     } catch (e) {
       console.error('Failed to save transfer stats', e);
+    }
+  }
+
+  private startSession() {
+    if (this.activeSession) {
+      if (this.sessionCloseTimer) {
+        clearTimeout(this.sessionCloseTimer);
+        this.sessionCloseTimer = null;
+      }
+      return;
+    }
+    
+    const shortId = 'sync-' + Math.random().toString(36).substring(2, 8);
+    this.activeSession = {
+      id: shortId,
+      connection_id: this.connectionId,
+      timestamp: new Date().toISOString(),
+      status: 'success',
+      duration: 0,
+      files: []
+    };
+    this.sessionStartTime = Date.now();
+    this.log('info', `Started new sync session: ${shortId}`);
+  }
+
+  private addFileToSession(name: string, relPath: string, size: number, direction: 'upload' | 'download' | 'delete', status: 'success' | 'failed' | 'skipped', message?: string) {
+    if (!this.activeSession) {
+      this.startSession();
+    }
+    
+    const formattedRelPath = relPath.replace(/\\/g, '/');
+    this.activeSession.files.push({
+      name,
+      path: formattedRelPath,
+      size,
+      direction,
+      status,
+      message
+    });
+
+    if (status === 'failed') {
+      this.activeSession.status = 'failed';
+    }
+
+    // If it's a success, copy the file to backup folder (no size limit)
+    if (status === 'success' && direction !== 'delete') {
+      try {
+        const targetDir = this.config.target_directory || '/';
+        const normRelPath = formattedRelPath.replace(/^\//, '');
+        const normTargetDir = targetDir.replace(/^\/|\/$/g, '');
+
+        let actualRelPath = normRelPath;
+        if (normTargetDir && normRelPath.startsWith(normTargetDir)) {
+          actualRelPath = normRelPath.substring(normTargetDir.length).replace(/^\//, '');
+        }
+
+        const backupFile = logStore.getBackupFilePath(
+          this.connectionId,
+          this.activeSession.id,
+          actualRelPath,
+          this.config.backup_path
+        );
+        
+        const sourcePath = path.join(this.localRoot, actualRelPath);
+
+        if (fs.existsSync(sourcePath)) {
+          fs.ensureDirSync(path.dirname(backupFile));
+          fs.copySync(sourcePath, backupFile);
+          console.log(`[Backup] Saved version for ${name} in session ${this.activeSession.id} at ${backupFile}`);
+        }
+      } catch (err) {
+        console.error('Failed to create file version backup:', err);
+      }
+    }
+  }
+
+  private debounceCloseSession() {
+    if (this.sessionCloseTimer) {
+      clearTimeout(this.sessionCloseTimer);
+    }
+    
+    this.sessionCloseTimer = setTimeout(() => {
+      // Only close if queue is empty
+      if (this.syncQueue.pending === 0 && this.syncQueue.size === 0) {
+        this.closeSession();
+      } else {
+        // If queue not empty, re-debounce
+        this.debounceCloseSession();
+      }
+    }, 3000);
+  }
+
+  private closeSession() {
+    if (!this.activeSession) return;
+    
+    this.activeSession.duration = Date.now() - this.sessionStartTime;
+    try {
+      logStore.addSyncSession(this.activeSession);
+      this.log('success', `Completed sync session: ${this.activeSession.id} (${this.activeSession.files.length} files processed)`);
+    } catch (e) {
+      console.error('Failed to save sync session to LogStore', e);
+    }
+    
+    this.activeSession = null;
+    if (this.sessionCloseTimer) {
+      clearTimeout(this.sessionCloseTimer);
+      this.sessionCloseTimer = null;
     }
   }
 
@@ -511,7 +917,13 @@ class SyncSession {
       activeUploads: Array.from(this.uploadProgress.values()),
       queueLength: this.syncQueue.size,
       totalFilesInBatch: this.totalFilesInBatch,
-      completedFiles: this.completedFilesInBatch
+      completedFiles: this.completedFilesInBatch,
+      filesUploaded: this.filesUploaded,
+      filesSkipped: this.filesSkipped,
+      filesDeleted: this.filesDeleted,
+      filesFailed: this.filesFailed,
+      uploadSpeedMBps: this.getWindowSpeed('upload'),
+      downloadSpeedMBps: this.getWindowSpeed('download')
     };
   }
 
@@ -523,6 +935,9 @@ class SyncSession {
 
     await fs.ensureDir(this.localRoot);
     this.log('info', `Local directory: ${this.localRoot}`);
+
+    // Warm local file cache in background
+    this.indexLocalFiles();
 
     // 1. Setup Watcher (Local -> Remote)
     // Only for bi_directional OR upload_only
@@ -603,7 +1018,18 @@ class SyncSession {
     return path.posix.join(remoteRoot, relative.split(path.sep).join('/'));
   }
 
-  public async manualUpload(localFilename: string, remoteName?: string) {
+  public async manualUpload(localFilename: string, remoteName?: string, isSubTask = false) {
+    if (!isSubTask) {
+      this.totalFilesInBatch = 1;
+      this.completedFilesInBatch = 0;
+      this.filesUploaded = 0;
+      this.filesSkipped = 0;
+      this.filesDeleted = 0;
+      this.filesFailed = 0;
+      this.batchStartTime = Date.now();
+      this.notifyProgress();
+    }
+
     // Use pool client instead of main client to allow parallelism
     const localPath = path.join(this.localRoot, localFilename);
     const filename = path.basename(localPath);
@@ -633,6 +1059,7 @@ class SyncSession {
           etaSeconds: 0,
           startTime
         });
+        this.notifyProgress();
 
         let lastProgressUpdate = 0;
         client.trackProgress((info) => {
@@ -646,6 +1073,14 @@ class SyncSession {
           const percent = totalBytes > 0 ? Math.round((info.bytes / totalBytes) * 100) : 0;
           const remainingBytes = totalBytes - info.bytes;
 
+          // Record delta to window
+          const prevProgress = this.uploadProgress.get(taskId);
+          const prevBytes = prevProgress ? prevProgress.bytesTransferred : 0;
+          const delta = info.bytes - prevBytes;
+          if (delta > 0) {
+            this.recordWindowBytes(delta, 'upload');
+          }
+
           this.uploadProgress.set(taskId, {
             type: 'upload',
             filename: localFilename,
@@ -656,6 +1091,7 @@ class SyncSession {
             etaSeconds: speedBps > 0 ? Math.round(remainingBytes / speedBps) : 0,
             startTime
           });
+          this.notifyProgress();
         });
 
         // Use remoteName if provided, otherwise use localFilename
@@ -677,14 +1113,26 @@ class SyncSession {
         });
         await client.uploadFrom(readStream, remotePath);
 
+        // Record final remaining bytes to window
+        const prevProgress = this.uploadProgress.get(taskId);
+        const prevBytes = prevProgress ? prevProgress.bytesTransferred : 0;
+        const remainingDelta = totalBytes - prevBytes;
+        if (remainingDelta > 0) {
+          this.recordWindowBytes(remainingDelta, 'upload');
+        }
+
         try {
           const stats = fs.statSync(localPath);
           await this.recordTransfer(stats.size, 'upload');
         } catch { }
         this.log('success', `Manual Upload: ${localFilename}${remoteName ? ` -> ${remoteName}` : ''}`);
+        // Update local cache
+        await this.updateLocalCache(localPath);
+        this.filesUploaded++;
 
       } catch (err: any) {
         this.log('error', `Manual upload failed: ${err.message}`);
+        this.filesFailed++;
 
         if (client) {
           try { client.close(); } catch { }
@@ -714,97 +1162,174 @@ class SyncSession {
           client.trackProgress(); // Clear listener
           this.releaseClient(client);
         }
+        this.completedFilesInBatch++;
+        this.notifyProgress();
       }
     };
 
     return performUpload();
   }
 
-  public async manualDownload(remoteFilePath: string) {
+  public async manualDownload(remoteFilePath: string, isSubTask = false) {
+    if (!isSubTask) {
+      this.totalFilesInBatch = 1;
+      this.completedFilesInBatch = 0;
+      this.filesUploaded = 0;
+      this.filesSkipped = 0;
+      this.filesDeleted = 0;
+      this.filesFailed = 0;
+      this.batchStartTime = Date.now();
+      this.notifyProgress();
+    }
+
+    const remoteRoot = this.config.target_directory || '/';
+    const normalizePath = (p: string) => p.replace(/\\/g, '/');
+    const normRemotePath = normalizePath(remoteFilePath);
+    const normRemoteRoot = normalizePath(remoteRoot);
+
+    let relPath = '';
+    if (normRemoteRoot === '/' || normRemoteRoot === '') {
+      relPath = normRemotePath.startsWith('/') ? normRemotePath.substring(1) : normRemotePath;
+    } else if (normRemotePath.startsWith(normRemoteRoot)) {
+      relPath = normRemotePath.substring(normRemoteRoot.length);
+      if (relPath.startsWith('/')) relPath = relPath.substring(1);
+    } else {
+      relPath = path.basename(remoteFilePath);
+    }
+
+    const localPath = path.join(this.localRoot, relPath.split('/').join(path.sep));
+
     let client: TransferClient | null = null;
     let retryCount = 0;
+    let offset = 0;
 
     const performDownload = async (): Promise<void> => {
       let taskId: string | undefined;
+      this.startSession();
       try {
         client = await this.acquireClient();
 
-        // Progress Tracking Setup
-        // Progress Tracking Setup
-        taskId = Date.now().toString() + Math.random().toString(36).substr(2, 9);
-        const startTime = Date.now();
         // For download, we might need to get remote size first for percentage
         let totalBytes = 0;
         try {
           const stats = await client.stat(remoteFilePath);
-          totalBytes = stats.size;
+          if (stats) totalBytes = stats.size;
         } catch { }
+
+        // Ensure task is recorded in DB queue
+        const db = await getDb();
+        const queuedTask = await db.get(
+          'SELECT status, bytes_transferred FROM sync_transfer_queue WHERE connection_id = ? AND file_path = ?',
+          this.connectionId,
+          localPath
+        );
+
+        if (!queuedTask) {
+          await this.addToQueueDb(localPath, 'download', totalBytes);
+        } else if (queuedTask.status === 'interrupted') {
+          await this.updateQueueStatusDb(localPath, 'syncing', queuedTask.bytes_transferred);
+        } else {
+          await this.updateQueueStatusDb(localPath, 'syncing', 0);
+        }
+
+        // Check if we should resume (only if it was marked interrupted)
+        if (queuedTask && queuedTask.status === 'interrupted' && fs.existsSync(localPath)) {
+          try {
+            const localStats = fs.statSync(localPath);
+            if (localStats.size > 0 && localStats.size < totalBytes) {
+              offset = localStats.size;
+              this.log('info', `Resuming download for ${path.basename(remoteFilePath)} at offset ${offset} bytes (${Math.round((offset/totalBytes)*100)}% done)`);
+            }
+          } catch (e) {
+            // ignore
+          }
+        }
+
+        // Progress Tracking Setup
+        taskId = Date.now().toString() + Math.random().toString(36).substr(2, 9);
+        const startTime = Date.now();
 
         this.uploadProgress.set(taskId, {
           type: 'download',
           filename: path.basename(remoteFilePath),
           totalBytes,
-          bytesTransferred: 0,
-          percent: 0,
+          bytesTransferred: offset,
+          percent: totalBytes > 0 ? Math.round((offset / totalBytes) * 100) : 0,
           speedMBps: 0,
           etaSeconds: 0,
           startTime
         });
+        this.notifyProgress();
 
         let lastProgressUpdate = 0;
+        let lastDbUpdate = Date.now();
         client.trackProgress((info) => {
           const now = Date.now();
           if (now - lastProgressUpdate < 200) return;
           lastProgressUpdate = now;
 
+          const currentTransferred = info.bytes + offset;
           const elapsed = (now - startTime) / 1000;
           const speedBps = elapsed > 0 ? info.bytes / elapsed : 0;
           const speedMBps = speedBps / (1024 * 1024);
-          const percent = totalBytes > 0 ? Math.round((info.bytes / totalBytes) * 100) : 0;
-          const remainingBytes = totalBytes - info.bytes;
+          const percent = totalBytes > 0 ? Math.min(100, Math.round((currentTransferred / totalBytes) * 100)) : 0;
+          const remainingBytes = Math.max(0, totalBytes - currentTransferred);
+
+          // Record delta to window
+          const prevProgress = this.uploadProgress.get(taskId);
+          const prevBytes = prevProgress ? prevProgress.bytesTransferred : offset;
+          const delta = currentTransferred - prevBytes;
+          if (delta > 0) {
+            this.recordWindowBytes(delta, 'download');
+          }
 
           this.uploadProgress.set(taskId, {
             type: 'download',
             filename: path.basename(remoteFilePath),
             totalBytes,
-            bytesTransferred: info.bytes,
+            bytesTransferred: currentTransferred,
             percent,
             speedMBps: Math.round(speedMBps * 100) / 100,
             etaSeconds: speedBps > 0 ? Math.round(remainingBytes / speedBps) : 0,
             startTime
           });
+          this.notifyProgress();
+
+          // Throttle database progress updates to every 2 seconds
+          if (now - lastDbUpdate > 2000) {
+            lastDbUpdate = now;
+            this.updateQueueStatusDb(localPath, 'syncing', currentTransferred);
+          }
         });
 
-        const remoteRoot = this.config.target_directory || '/';
-
-        // Manual path resolution instead of path.posix.relative
-        const normalizePath = (p: string) => p.replace(/\\/g, '/');
-        const normRemotePath = normalizePath(remoteFilePath);
-        const normRemoteRoot = normalizePath(remoteRoot);
-
-        let relPath = '';
-        if (normRemoteRoot === '/' || normRemoteRoot === '') {
-          relPath = normRemotePath.startsWith('/') ? normRemotePath.substring(1) : normRemotePath;
-        } else if (normRemotePath.startsWith(normRemoteRoot)) {
-          relPath = normRemotePath.substring(normRemoteRoot.length);
-          if (relPath.startsWith('/')) relPath = relPath.substring(1);
-        } else {
-          relPath = path.basename(remoteFilePath);
-        }
-
-        const localPath = path.join(this.localRoot, relPath.split('/').join(path.sep));
-
         await fs.ensureDir(path.dirname(localPath));
-        await client.downloadTo(localPath, remoteFilePath);
-        this.log('success', `Manual Download: ${path.basename(remoteFilePath)}`);
+        await client.downloadTo(localPath, remoteFilePath, offset);
+
+        // Record final remaining bytes to window
+        const prevProgress = this.uploadProgress.get(taskId);
+        const prevBytes = prevProgress ? prevProgress.bytesTransferred : offset;
+        const remainingDelta = totalBytes - prevBytes;
+        if (remainingDelta > 0) {
+          this.recordWindowBytes(remainingDelta, 'download');
+        }
+        this.log('success', `Downloaded${offset > 0 ? ' (Resumed)' : ''}: ${path.basename(remoteFilePath)}`);
+
+        // Update local cache
+        await this.updateLocalCache(localPath);
+        await this.removeFromQueueDb(localPath);
 
         try {
           const stats = fs.statSync(localPath);
-          await this.recordTransfer(stats.size, 'download');
-        } catch { }
+          await this.recordTransfer(stats.size - offset, 'download');
+          this.addFileToSession(path.basename(remoteFilePath), relPath, stats.size, 'download', 'success');
+        } catch {
+          this.addFileToSession(path.basename(remoteFilePath), relPath, totalBytes, 'download', 'success');
+        }
 
       } catch (err: any) {
         this.log('error', `Manual download failed: ${err.message}`);
+        await this.updateQueueStatusDb(localPath, 'failed', offset);
+        this.addFileToSession(path.basename(remoteFilePath), relPath, 0, 'download', 'failed', err.message);
 
         if (client) {
           try { client.close(); } catch { }
@@ -830,10 +1355,12 @@ class SyncSession {
       } finally {
         // Cleanup progress
         if (taskId) this.uploadProgress.delete(taskId);
+        this.notifyProgress();
         if (client) {
           client.trackProgress();
           this.releaseClient(client);
         }
+        this.debounceCloseSession();
       }
     };
 
@@ -847,6 +1374,9 @@ class SyncSession {
       this.log('info', 'Reloaded .ftpignore patterns');
       return;
     }
+
+    // Update local cache
+    await this.updateLocalCache(localPath);
 
     // Simply add file to batch queue - it will be uploaded with other files
     await this.queueFileForUpload(localPath);
@@ -862,8 +1392,10 @@ class SyncSession {
       return;
     }
 
+    this.totalFilesInBatch++;
     this.deleteQueue.add(JSON.stringify({ localPath, localRoot }));
     this.log('info', `Queued delete: ${path.basename(localPath)}`);
+    this.notifyProgress();
 
     // Add delete task to main syncQueue to respect global concurrency
     this.syncQueue.add(() => this.processSingleDelete(localPath, localRoot));
@@ -872,18 +1404,25 @@ class SyncSession {
   // Process a single delete (wrapped in syncQueue)
   private async processSingleDelete(localPath: string, localRoot: string) {
     const filename = path.basename(localPath);
+    const remotePath = this.toRemotePath(localPath, localRoot);
     let client: TransferClient | null = null;
+    this.startSession();
     try {
       client = await this.acquireClient();
-      const remotePath = this.toRemotePath(localPath, localRoot);
       await client.remove(remotePath);
       this.log('success', `Deleted: ${filename}`);
+      this.filesDeleted++;
+      this.addFileToSession(filename, remotePath, 0, 'delete', 'success');
     } catch (err: any) {
       // 550 = File not found (already deleted?), that's a success for us
       if (err.code === 550 || err.message.includes('No such file')) {
         this.log('success', `Deleted (Not found): ${filename}`);
+        this.filesDeleted++;
+        this.addFileToSession(filename, remotePath, 0, 'delete', 'skipped', 'Not found on server');
       } else {
         this.log('error', `Delete failed: ${filename} - ${err.message}`);
+        this.filesFailed++;
+        this.addFileToSession(filename, remotePath, 0, 'delete', 'failed', err.message);
         // Retry once? Or just let it fail. For built files, usually re-upload happens anyway.
         // If error is connection related, maybe we should retry.
         if (err.message.includes('closed') || err.message.includes('FIN')) {
@@ -900,6 +1439,9 @@ class SyncSession {
       }
       // Remove from set
       this.deleteQueue.delete(JSON.stringify({ localPath, localRoot }));
+      this.completedFilesInBatch++;
+      this.notifyProgress();
+      this.debounceCloseSession();
     }
   }
 
@@ -910,6 +1452,9 @@ class SyncSession {
   }
 
   private async handleLocalDelete(localPath: string, localRoot: string) {
+    // Remove from local cache
+    await this.deleteFromLocalCache(localPath);
+
     await this.queueFileForDelete(localPath, localRoot);
   }
 
@@ -922,6 +1467,17 @@ class SyncSession {
   private async runSyncCycle(localRoot: string) {
     if (this.isSyncing) return;
     this.isSyncing = true;
+
+    // Reset batch progress counters
+    this.totalFilesInBatch = 0;
+    this.completedFilesInBatch = 0;
+    this.filesUploaded = 0;
+    this.filesSkipped = 0;
+    this.filesDeleted = 0;
+    this.filesFailed = 0;
+    this.batchStartTime = Date.now();
+    this.notifyProgress();
+
     this.log('info', 'Starting periodic sync scan...');
 
     try {
@@ -936,23 +1492,17 @@ class SyncSession {
 
       let downloadCount = 0;
 
+      // Count files that need download first to populate totalFilesInBatch correctly
+      const filesToDownload: any[] = [];
       for (const file of remoteFiles) {
-        // INTERLEAVING POINT: We release mutex here so user actions can squeeze in.
-
         const relPath = path.posix.relative(remoteRoot, file.path);
         const localPath = path.join(localRoot, relPath.split('/').join(path.sep));
-
-        // ... (ignore check logic unchanged) ...
-        if (await shouldIgnore(localRoot, localPath)) {
-          continue;
-        }
+        if (await shouldIgnore(localRoot, localPath)) continue;
 
         let shouldDownload = false;
-
         if (!fs.existsSync(localPath)) {
           shouldDownload = true;
         } else {
-          // ... (time check logic unchanged) ...
           const localStats = fs.statSync(localPath);
           const remoteTime = new Date(file.modifiedAt || 0).getTime();
           const localTime = localStats.mtime.getTime();
@@ -960,28 +1510,31 @@ class SyncSession {
             shouldDownload = true;
           }
         }
-
         if (shouldDownload) {
-          this.log('info', `Downloading: ${file.name}`);
+          filesToDownload.push({ file, localPath });
+        }
+      }
 
-          await fs.ensureDir(path.dirname(localPath));
-          this.pendingDownloads.add(localPath);
+      this.totalFilesInBatch = filesToDownload.length;
+      this.notifyProgress();
 
-          try {
-            // ACQUIRE MUTEX FOR DOWNLOAD
-            await this.mutex.run(async () => {
-              await this.ensureConnection(); // Ensure just in case
-              await this.client.downloadTo(localPath, file.path);
-            });
+      for (const { file, localPath } of filesToDownload) {
+        this.log('info', `Downloading: ${file.name}`);
+        this.pendingDownloads.add(localPath);
 
-            downloadCount++;
-            this.recordTransfer(file.size, 'download');
-            this.log('success', `Downloaded: ${file.name}`);
-          } catch (err: any) {
-            this.pendingDownloads.delete(localPath);
-            throw err;
-          }
+        try {
+          // ACQUIRE MUTEX FOR DOWNLOAD
+          await this.mutex.run(async () => {
+            await this.manualDownload(file.path, true);
+          });
 
+          downloadCount++;
+        } catch (err: any) {
+          this.pendingDownloads.delete(localPath);
+          this.log('error', `Download failed for ${file.name}: ${err.message}`);
+        } finally {
+          this.completedFilesInBatch++;
+          this.notifyProgress();
           setTimeout(() => this.pendingDownloads.delete(localPath), 5000);
         }
       }
@@ -1089,6 +1642,15 @@ class SyncSession {
   public async processBulkSync(items: { path: string, localName?: string | null, direction: 'upload' | 'download', isDirectory: boolean }[], basePath: string) {
     this.log('info', `Starting bulk sync of ${items.length} items (Pool size: ${this.poolSize})...`);
 
+    this.totalFilesInBatch = items.filter(i => !i.isDirectory).length;
+    this.completedFilesInBatch = 0;
+    this.filesUploaded = 0;
+    this.filesSkipped = 0;
+    this.filesDeleted = 0;
+    this.filesFailed = 0;
+    this.batchStartTime = Date.now();
+    this.notifyProgress();
+
     // Pre-warm connection pool so transfers start immediately without cold-start delay
     await this.warmConnectionPool();
 
@@ -1128,7 +1690,7 @@ class SyncSession {
         if (item.isDirectory) {
           await this.downloadDirectory(remotePath);
         } else {
-          await this.manualDownload(remotePath);
+          await this.manualDownload(remotePath, true);
         }
       } catch (e: any) {
         this.log('error', `Bulk download failed for ${item.path}: ${e.message}`);
@@ -1176,14 +1738,20 @@ class SyncSession {
   private queueFileForUploadNonBlocking(localPath: string): void {
     // Check ignore patterns synchronously if possible, or skip check for speed
     // For now, we'll do async check but not await it
-    shouldIgnore(this.localRoot, localPath).then(ignored => {
+    shouldIgnore(this.localRoot, localPath).then(async (ignored) => {
       if (ignored) {
         this.log('info', `Ignored (upload): ${path.basename(localPath)}`);
         return;
       }
 
       this.totalFilesInBatch++;
+      this.notifyProgress();
       this.log('info', `Queued: ${path.basename(localPath)}`);
+
+      try {
+        const stats = await fs.stat(localPath);
+        await this.addToQueueDb(localPath, 'upload', stats.size);
+      } catch (e) {}
 
       // Add to p-queue but DON'T return the promise
       this.syncQueue.add(async () => {
@@ -1202,12 +1770,22 @@ class SyncSession {
 
       this.log('info', `Found ${files.length} files in ${path.basename(remoteDirPath)}`);
 
+      // Initialize batch progress for directory download
+      this.totalFilesInBatch = files.length;
+      this.completedFilesInBatch = 0;
+      this.filesUploaded = 0;
+      this.filesSkipped = 0;
+      this.filesDeleted = 0;
+      this.filesFailed = 0;
+      this.batchStartTime = Date.now();
+      this.notifyProgress();
+
       // Queue all files for parallel download instead of sequential
       // Each file will be processed by PQueue with concurrency control
       const downloadPromises = files.map(file => 
         this.syncQueue.add(async () => {
           try {
-            await this.manualDownload(file.path);
+            await this.manualDownload(file.path, true);
           } catch (e: any) {
             this.log('error', `Failed to download file ${file.name}: ${e.message}`);
           }
@@ -1279,10 +1857,143 @@ class SyncSession {
       return { local: localContent, remote: remoteContent };
     });
   }
+
+  public async resumeInterrupted(interruptedItems: any[]) {
+    this.log('info', `Resuming ${interruptedItems.length} interrupted transfers from previous crash...`);
+
+    // Reset session batch counters
+    this.totalFilesInBatch = interruptedItems.length;
+    this.completedFilesInBatch = 0;
+    this.filesUploaded = 0;
+    this.filesSkipped = 0;
+    this.filesDeleted = 0;
+    this.filesFailed = 0;
+    this.batchStartTime = Date.now();
+    this.notifyProgress();
+
+    // Pre-warm connection pool
+    await this.warmConnectionPool();
+
+    // Enqueue each item into the sync queue. PQueue will process them with concurrency control.
+    for (const item of interruptedItems) {
+      if (item.direction === 'upload') {
+        this.syncQueue.add(async () => {
+          if (!fs.existsSync(item.file_path)) {
+            this.log('error', `Local file not found for resume: ${path.basename(item.file_path)}`);
+            await this.removeFromQueueDb(item.file_path);
+            this.completedFilesInBatch++;
+            this.notifyProgress();
+            return;
+          }
+          await this.uploadFile(item.file_path);
+        });
+      } else {
+        this.syncQueue.add(async () => {
+          try {
+            // Calculate remoteFilePath
+            const relative = path.relative(this.localRoot, item.file_path);
+            const remoteRoot = this.config.target_directory || '/';
+            const remoteFilePath = path.posix.join(remoteRoot, relative.split(path.sep).join('/'));
+
+            await this.manualDownload(remoteFilePath, true);
+          } catch (e: any) {
+            this.log('error', `Resume download failed for ${path.basename(item.file_path)}: ${e.message}`);
+          } finally {
+            this.completedFilesInBatch++;
+            this.notifyProgress();
+          }
+        });
+      }
+    }
+  }
+
+  private async addToQueueDb(filePath: string, direction: 'upload' | 'download', totalSize: number) {
+    try {
+      const db = await getDb();
+      await db.run(
+        `INSERT OR REPLACE INTO sync_transfer_queue 
+         (connection_id, file_path, direction, total_size, bytes_transferred, status, updated_at) 
+         VALUES (?, ?, ?, ?, 0, 'pending', CURRENT_TIMESTAMP)`,
+        this.connectionId,
+        filePath,
+        direction,
+        totalSize
+      );
+    } catch (err: any) {
+      console.error(`[SyncService] Failed to add file to DB queue: ${err.message}`);
+    }
+  }
+
+  private async updateQueueStatusDb(filePath: string, status: 'pending' | 'syncing' | 'completed' | 'failed' | 'interrupted', bytesTransferred = 0) {
+    try {
+      const db = await getDb();
+      await db.run(
+        `UPDATE sync_transfer_queue 
+         SET status = ?, bytes_transferred = ?, updated_at = CURRENT_TIMESTAMP 
+         WHERE connection_id = ? AND file_path = ?`,
+        status,
+        bytesTransferred,
+        this.connectionId,
+        filePath
+      );
+    } catch (err: any) {
+      console.error(`[SyncService] Failed to update file queue status in DB: ${err.message}`);
+    }
+  }
+
+  private async removeFromQueueDb(filePath: string) {
+    try {
+      const db = await getDb();
+      await db.run(
+        `DELETE FROM sync_transfer_queue 
+         WHERE connection_id = ? AND file_path = ?`,
+        this.connectionId,
+        filePath
+      );
+    } catch (err: any) {
+      console.error(`[SyncService] Failed to remove file from DB queue: ${err.message}`);
+    }
+  }
+
+  public async restoreFileVersion(sessionId: string, relPath: string): Promise<void> {
+    const targetDir = this.config.target_directory || '/';
+    const normRelPath = relPath.replace(/\\/g, '/').replace(/^\//, '');
+    const normTargetDir = targetDir.replace(/^\/|\/$/g, '');
+
+    let actualRelPath = normRelPath;
+    if (normTargetDir && normRelPath.startsWith(normTargetDir)) {
+      actualRelPath = normRelPath.substring(normTargetDir.length).replace(/^\//, '');
+    }
+
+    const backupFile = logStore.getBackupFilePath(
+      this.connectionId,
+      sessionId,
+      actualRelPath,
+      this.config.backup_path
+    );
+
+    if (!fs.existsSync(backupFile)) {
+      throw new Error(`Backup file not found at ${backupFile}`);
+    }
+
+    const localPath = path.join(this.localRoot, actualRelPath);
+    await fs.ensureDir(path.dirname(localPath));
+    await fs.copy(backupFile, localPath);
+    this.log('info', `Restored ${path.basename(actualRelPath)} locally from session ${sessionId}`);
+
+    // Now trigger manual upload to sync with FTP server
+    await this.ensureConnection();
+    await this.manualUpload(actualRelPath);
+    this.log('success', `Successfully rolled back ${path.basename(actualRelPath)} to version from session ${sessionId}`);
+  }
 }
 
-class SyncManager {
+class SyncManager extends EventEmitter {
   private sessions: Map<number, SyncSession> = new Map();
+
+  constructor() {
+    super();
+  }
 
   private async getSession(connectionId: number): Promise<SyncSession> {
     if (this.sessions.has(connectionId)) {
@@ -1293,6 +2004,9 @@ class SyncManager {
     if (!config) throw new Error('Connection not found');
 
     const session = new SyncSession(connectionId, config);
+    session.onProgress = (progress) => {
+      this.emit('progress', connectionId, progress);
+    };
     this.sessions.set(connectionId, session);
     return session;
   }
@@ -1320,6 +2034,11 @@ class SyncManager {
     await session.manualUpload(filename, remoteName);
   }
 
+  public async restoreFileVersion(connectionId: number, sessionId: string, relPath: string) {
+    const session = await this.getSession(connectionId);
+    await session.restoreFileVersion(sessionId, relPath);
+  }
+
   public async manualDownload(connectionId: number, remotePath: string) {
     const session = await this.getSession(connectionId);
     await session.manualDownload(remotePath);
@@ -1345,6 +2064,17 @@ class SyncManager {
     return session.getContentDiff(filename, remoteName);
   }
 
+  public async runWithClient<T>(connectionId: number, fn: (client: TransferClient) => Promise<T>, isInteractive = false): Promise<T> {
+    const session = await this.getSession(connectionId);
+    return session.runWithClient(fn, isInteractive);
+  }
+
+  public isCacheWarmed(connectionId: number): boolean {
+    const session = this.sessions.get(connectionId);
+    if (!session) return false;
+    return session.isCacheWarmed();
+  }
+
   // Removed suspend/resume exports since we use shared connection
   /* 
   public async suspendSync(connectionId: number) { ... }
@@ -1352,9 +2082,16 @@ class SyncManager {
   */
 
   public getStatus(connectionId: number) {
+    const dbLogs = logStore.getLogs(connectionId);
+    const mappedLogs = dbLogs.map(l => ({
+      timestamp: l.created_at,
+      type: l.type,
+      message: l.message
+    }));
+
     return {
       running: this.sessions.has(connectionId),
-      logs: this.sessions.get(connectionId)?.getLogs() || []
+      logs: mappedLogs
     };
   }
 
@@ -1362,6 +2099,47 @@ class SyncManager {
     const session = this.sessions.get(connectionId);
     if (!session) return null;
     return session.getProgress();
+  }
+
+  public async getInterruptedSessions(): Promise<any[]> {
+    const db = await getDb();
+    const rows = await db.all(`
+      SELECT 
+        q.connection_id,
+        c.name as connection_name,
+        c.server,
+        COUNT(*) as file_count,
+        SUM(q.total_size) as total_size,
+        SUM(q.bytes_transferred) as bytes_transferred
+      FROM sync_transfer_queue q
+      JOIN ftp_connections c ON q.connection_id = c.id
+      WHERE q.status = 'interrupted'
+      GROUP BY q.connection_id
+    `);
+    return rows;
+  }
+
+  public async resumeInterruptedSync(connectionId: number) {
+    const session = await this.getSession(connectionId);
+    
+    // Fetch all interrupted files for this connection
+    const db = await getDb();
+    const interruptedItems = await db.all(
+      "SELECT * FROM sync_transfer_queue WHERE connection_id = ? AND status = 'interrupted'",
+      connectionId
+    );
+
+    if (interruptedItems.length === 0) {
+      return;
+    }
+
+    await session.resumeInterrupted(interruptedItems);
+  }
+
+  public async discardInterruptedSync(connectionId: number) {
+    const db = await getDb();
+    await db.run("DELETE FROM sync_transfer_queue WHERE connection_id = ?", connectionId);
+    console.log(`Discarded interrupted transfers for connection ${connectionId}`);
   }
 }
 

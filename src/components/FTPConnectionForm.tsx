@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { FTPConnection, FTPConnectionFormData } from '../types';
-import { Save, X, Folder, CheckCircle, AlertCircle, HardDrive, Wifi, FileText, ChevronDown, ChevronUp } from 'lucide-react';
+import { Save, X, Folder, CheckCircle, AlertCircle, FileText, ChevronDown, ChevronUp } from 'lucide-react';
 import LocalFolderBrowser from './LocalFolderBrowser';
 
 interface Props {
@@ -18,6 +18,7 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
     password: '',
     targetDirectory: '/',
     localPath: '',
+    backupPath: '',
     syncMode: 'bi_directional',
     secure: false,
     syncDeletions: false,
@@ -36,7 +37,7 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
   const [pathMessage, setPathMessage] = useState('');
 
   // Browser Modal State
-  const [showBrowser, setShowBrowser] = useState(false);
+  const [browserTarget, setBrowserTarget] = useState<'local' | 'backup' | null>(null);
 
   // Test Connection State
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
@@ -58,9 +59,10 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
         password: '',
         targetDirectory: initialData.target_directory || '/',
         localPath: initialData.local_path || '',
+        backupPath: initialData.backup_path || '',
         syncMode: initialData.sync_mode || 'bi_directional',
         secure: !!initialData.secure,
-        syncDeletions: (initialData.sync_deletions as any) === true || (initialData.sync_deletions as any) === 1 || String(initialData.sync_deletions) === '1' || String(initialData.sync_deletions) === 'true',
+        syncDeletions: (initialData.sync_deletions as unknown) === true || (initialData.sync_deletions as unknown) === 1 || String(initialData.sync_deletions) === '1' || String(initialData.sync_deletions) === 'true',
         parallelConnections: initialData.parallel_connections || 3,
         bufferSize: initialData.buffer_size || 16,
         protocol: initialData.protocol || 'ftp',
@@ -107,7 +109,7 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
       } else {
         setIgnoreSaveStatus('error');
       }
-    } catch (err) {
+    } catch {
       setIgnoreSaveStatus('error');
     }
   };
@@ -179,7 +181,7 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
         setPathStatus('invalid');
         setPathMessage(data.message);
       }
-    } catch (err) {
+    } catch {
       setPathStatus('invalid');
       setPathMessage('Check failed');
     }
@@ -213,10 +215,22 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
         setTestStatus('error');
         setTestMessage(data.message || 'Connection failed');
       }
-    } catch (err) {
+    } catch {
       setTestStatus('error');
       setTestMessage('Network error');
     }
+  };
+
+  const handleMainKeyUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const content = event.target?.result as string;
+      setFormData(prev => ({ ...prev, privateKey: content }));
+    };
+    reader.readAsText(file);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -224,7 +238,50 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
     setLoading(true);
     setError('');
 
+    let validationStatus: 'verified' | 'failed' | 'unverified' = 'unverified';
+    let validationMessage = '';
+
     try {
+      // 1. Check local path validity
+      if (formData.localPath) {
+        const pathRes = await fetch('/api/ftp-connections/check-path', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: formData.localPath })
+        });
+        const pathData = await pathRes.json();
+        if (!pathData.valid) {
+          validationStatus = 'failed';
+          validationMessage = `Invalid local path: ${pathData.message}`;
+        }
+      }
+
+      // 2. If path is valid so far, check host connection
+      if (validationStatus !== 'failed') {
+        const testRes = await fetch('/api/ftp-connections/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            server: formData.server,
+            port: formData.port,
+            username: formData.username,
+            password: formData.password,
+            protocol: formData.protocol,
+            privateKey: formData.privateKey,
+            id: initialData?.id
+          })
+        });
+        const testData = await testRes.json();
+        if (testData.success) {
+          validationStatus = 'verified';
+          validationMessage = 'Credentials and paths verified successfully';
+        } else {
+          validationStatus = 'failed';
+          validationMessage = `Connection check failed: ${testData.message}`;
+        }
+      }
+
+      // 3. Submit connection with validation results
       const url = initialData
         ? `/api/ftp-connections/${initialData.id}`
         : '/api/ftp-connections';
@@ -236,7 +293,11 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(formData),
+        body: JSON.stringify({
+          ...formData,
+          validationStatus,
+          validationMessage
+        }),
       });
 
       if (!response.ok) {
@@ -245,8 +306,8 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
       }
 
       onSuccess();
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
@@ -254,284 +315,436 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
 
   return (
     <React.Fragment>
-      {showBrowser && (
+      {browserTarget !== null && (
         <LocalFolderBrowser
           onSelect={(path) => {
-            setFormData(prev => ({ ...prev, localPath: path }));
-            checkPath(path);
-            setShowBrowser(false);
+            if (browserTarget === 'local') {
+              setFormData(prev => ({ ...prev, localPath: path }));
+              checkPath(path);
+            } else if (browserTarget === 'backup') {
+              setFormData(prev => ({ ...prev, backupPath: path }));
+            }
+            setBrowserTarget(null);
           }}
-          onClose={() => setShowBrowser(false)}
+          onClose={() => setBrowserTarget(null)}
         />
       )}
 
-      <div className="bg-white p-6 rounded-lg shadow-md border border-gray-100">
-        <div className="flex justify-between items-center mb-4">
-          <h3 className="text-lg font-semibold text-gray-800">
-            {initialData ? 'Edit Connection' : 'New Connection'}
+      <div className="bg-neutral-900 p-6 rounded-none border border-neutral-800 text-neutral-200 font-mono shadow-2xl">
+        <div className="flex justify-between items-center mb-6 border-b border-neutral-800 pb-4 select-none">
+          <h3 className="text-xs font-black text-neutral-100 uppercase tracking-widest flex items-center gap-2">
+            <span className="w-1.5 h-3.5 bg-orange-500 block animate-signal"></span>
+            {initialData ? 'EDIT_CONNECTION' : 'NEW_CONNECTION'}
           </h3>
-          <button onClick={onCancel} className="text-gray-500 hover:text-gray-700">
-            <X size={20} />
+          <button onClick={onCancel} className="text-neutral-500 hover:text-neutral-300 transition-colors p-1 border border-neutral-850 bg-neutral-950 hover:bg-neutral-850">
+            <X size={14} />
           </button>
         </div>
 
         {error && (
-          <div className="mb-4 p-3 bg-red-50 text-red-600 rounded-md text-sm">
-            {error}
+          <div className="mb-5 p-3 bg-red-950/20 border border-red-900/50 text-red-400 text-xs font-mono uppercase">
+            ERROR // SYSTEM_FAULT: {error}
           </div>
         )}
-
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Connection Name <span className="text-gray-400 font-normal">(Optional)</span>
-            </label>
-            <input
-              type="text"
-              name="name"
-              value={formData.name}
-              onChange={handleChange}
-              placeholder="My Production Server"
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Protocol</label>
-              <select
-                name="protocol"
-                value={formData.protocol}
-                onChange={handleChange}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                <option value="ftp">FTP - File Transfer Protocol</option>
-                <option value="ftps">FTPS - FTP over SSL/TLS</option>
-                <option value="sftp">SFTP - SSH File Transfer Protocol</option>
-              </select>
+        
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <div className="space-y-5">
+            
+            {/* Section Headers Row */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6 pb-2 border-b border-neutral-850">
+              <div className="flex items-center gap-1.5">
+                <span className="w-1 h-3 bg-orange-500 block"></span>
+                <span className="text-[10px] font-black text-neutral-450 uppercase tracking-widest">
+                  Server Credentials
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5 mt-4 lg:mt-0">
+                <span className="w-1 h-3 bg-emerald-500 block"></span>
+                <span className="text-[10px] font-black text-neutral-450 uppercase tracking-widest">
+                  Sync Engine Config
+                </span>
+              </div>
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">FTP Server</label>
-              <input
-                type="text"
-                name="server"
-                value={formData.server}
-                onChange={handleChange}
-                required
-                placeholder={formData.protocol === 'sftp' ? 'sftp.example.com' : 'ftp.example.com'}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Port</label>
-              <input
-                type="number"
-                name="port"
-                value={formData.port}
-                onChange={handleChange}
-                required
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-              {formData.protocol !== 'sftp' && (
-                <div className="mt-2 flex items-center">
-                  <input
-                    id="secure"
-                    name="secure"
-                    type="checkbox"
-                    checked={formData.secure}
-                    onChange={handleChange}
-                    className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-                  />
-                  <label htmlFor="secure" className="ml-2 block text-sm text-gray-900">
-                    Use SSL/TLS (FTPS)
-                  </label>
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Username</label>
-              <input
-                type="text"
-                name="username"
-                value={formData.username}
-                onChange={handleChange}
-                required
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Password {initialData && <span className="text-gray-400 font-normal">(Leave blank to keep current)</span>}
-                {!initialData && !formData.privateKey && <span className="text-red-500 ml-1">*</span>}
-              </label>
-              <input
-                type="password"
-                name="password"
-                value={formData.password}
-                onChange={handleChange}
-                required={!initialData && !formData.privateKey}
-                className={`w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 ${!initialData && !formData.privateKey && !formData.password && error ? 'border-red-500' : 'border-gray-300'
-                  }`}
-                placeholder={formData.protocol === 'sftp' && formData.privateKey ? 'Passphrase (optional)' : ''}
-              />
-            </div>
-          </div>
-
-          {formData.protocol === 'sftp' && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Private Key (Content or Path) <span className="text-gray-400 text-xs">(Optional if using password)</span>
-              </label>
-              <textarea
-                name="privateKey"
-                value={formData.privateKey || ''}
-                onChange={(e) => setFormData(prev => ({ ...prev, privateKey: e.target.value }))}
-                placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 h-24 font-mono text-xs"
-              />
-              <p className="text-xs text-gray-500 mt-1">Paste your Private Key content here. If using path, server must be running locally or have access.</p>
-            </div>
-          )}
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Remote Target Directory</label>
-            <input
-              type="text"
-              name="targetDirectory"
-              value={formData.targetDirectory}
-              onChange={handleChange}
-              placeholder="/public_html"
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Sync Mode</label>
-              <select
-                name="syncMode"
-                value={formData.syncMode}
-                onChange={handleChange}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                <option value="bi_directional">Bi-directional (2-Way)</option>
-                <option value="upload_only">Upload Only (Local -&gt; FTP)</option>
-                <option value="download_only">Download Only (FTP -&gt; Local)</option>
-              </select>
-
-              {(formData.syncMode === 'bi_directional' || formData.syncMode === 'upload_only') && (
-                <div className="mt-3 flex items-start p-3 bg-red-50 rounded-md border border-red-100">
-                  <div className="flex items-center h-5">
-                    <input
-                      id="syncDeletions"
-                      name="syncDeletions"
-                      type="checkbox"
-                      checked={formData.syncDeletions}
-                      onChange={handleChange}
-                      className="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300 rounded"
-                    />
-                  </div>
-                  <div className="ml-3 text-sm">
-                    <label htmlFor="syncDeletions" className="font-medium text-red-800">Sync Deletions</label>
-                    <p className="text-red-600 text-xs mt-0.5">
-                      Warning: Deleting a file locally will PERMANENTLY delete it from the FTP server.
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              <div className="mt-4">
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Parallel Connections
-                  <span className="ml-1 text-xs font-normal text-gray-400" title="Số FTP connections đồng thời. Cao hơn = nhanh hơn nhưng có thể gây quá tải server">
-                    (1-10)
-                  </span>
+            {/* Row 1: Connection Name vs Remote Target Path */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-4">
+              <div className="flex flex-col justify-end">
+                <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5">
+                  Connection Name <span className="text-neutral-600 font-normal font-sans">(Optional)</span>
                 </label>
                 <input
-                  type="number"
-                  name="parallelConnections"
-                  value={formData.parallelConnections}
+                  type="text"
+                  name="name"
+                  value={formData.name}
                   onChange={handleChange}
-                  min={1}
-                  max={10}
-                  className="w-24 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="E.G. PRODUCTION_NODE_01"
+                  className="w-full px-3 py-2 bg-neutral-955 border border-neutral-850 focus:border-orange-500 focus:ring-1 focus:ring-orange-500/20 rounded-none text-xs text-neutral-200 placeholder-neutral-750 font-mono transition-all outline-none"
                 />
-                <p className="text-xs text-gray-500 mt-1">
-                  Số lượng FTP connections song song khi upload. Giá trị cao tăng tốc độ nhưng có thể gây quá tải server.
-                </p>
               </div>
 
-              <div className="mt-4">
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Buffer Size
-                  <span className="ml-1 text-xs font-normal text-gray-400">
-                    (MB)
-                  </span>
+              <div>
+                <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5">
+                  Remote Target Path
                 </label>
-                <select
-                  name="bufferSize"
-                  value={formData.bufferSize}
+                <input
+                  type="text"
+                  name="targetDirectory"
+                  value={formData.targetDirectory}
                   onChange={handleChange}
-                  className="w-32 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value={4}>4 MB</option>
-                  <option value={8}>8 MB</option>
-                  <option value={16}>16 MB</option>
-                  <option value={32}>32 MB</option>
-                  <option value={64}>64 MB</option>
-                  <option value={128}>128 MB</option>
-                </select>
-                <p className="text-xs text-gray-500 mt-1">
-                  Buffer lớn hơn = tốc độ cao hơn, nhưng sử dụng nhiều RAM hơn.
-                </p>
+                  placeholder="/public_html"
+                  className="w-full px-3 py-2 bg-neutral-950 border border-neutral-850 focus:border-orange-500 focus:ring-1 focus:ring-orange-500/20 rounded-none text-xs text-neutral-200 font-mono outline-none"
+                />
+              </div>
+            </div>
+
+            {/* Row 2: Protocol & Server Host vs Local Folder Path */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5">
+                    Protocol
+                  </label>
+                  <select
+                    name="protocol"
+                    value={formData.protocol}
+                    onChange={handleChange}
+                    className="w-full px-3 py-2 bg-neutral-955 border border-neutral-850 focus:border-orange-500 focus:ring-1 focus:ring-orange-500/20 rounded-none text-xs text-neutral-250 font-mono outline-none cursor-pointer"
+                  >
+                    <option value="ftp">FTP - FILE TRANSFER PROTOCOL</option>
+                    <option value="ftps">FTPS - FTP OVER SSL/TLS</option>
+                    <option value="sftp">SFTP - SSH FILE TRANSFER PROTOCOL</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5">
+                    Server Host
+                  </label>
+                  <input
+                    type="text"
+                    name="server"
+                    value={formData.server}
+                    onChange={handleChange}
+                    required
+                    placeholder={formData.protocol === 'sftp' ? 'sftp.example.com' : 'ftp.example.com'}
+                    className="w-full px-3 py-2 bg-neutral-950 border border-neutral-850 focus:border-orange-500 focus:ring-1 focus:ring-orange-500/20 rounded-none text-xs text-neutral-200 placeholder-neutral-750 font-mono outline-none"
+                  />
+                </div>
               </div>
 
-              <div className="mt-4">
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Conflict Resolution
+              <div>
+                <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5">
+                  Local Folder Path
                 </label>
-                <select
-                  name="conflictResolution"
-                  value={formData.conflictResolution}
-                  onChange={handleChange}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="overwrite">Overwrite (Always replace)</option>
-                  <option value="newer">Overwrite if newer (Source is newer)</option>
-                  <option value="different_size">Overwrite if different size</option>
-                </select>
-                <p className="text-xs text-gray-500 mt-1">
-                  Xử lý khi file đã tồn tại trên server.
-                </p>
+                <div className="flex">
+                  <input
+                    type="text"
+                    name="localPath"
+                    value={formData.localPath}
+                    onChange={handleChange}
+                    placeholder="E.G. E:\PROJECTS\MYSITE"
+                    className={`flex-1 px-3 py-2 bg-neutral-950 border focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500/20 rounded-none text-xs text-neutral-200 font-mono outline-none ${
+                      pathStatus === 'invalid' ? 'border-red-900 bg-red-955/15' :
+                      pathStatus === 'valid' ? 'border-emerald-900 bg-emerald-955/15' : 'border-neutral-850'
+                    }`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setBrowserTarget('local')}
+                    className="px-3 py-2 bg-neutral-955 border-t border-b border-r border-neutral-850 hover:bg-neutral-850 text-neutral-400 rounded-none text-xs transition-colors"
+                    title="Browse Folder"
+                  >
+                    <Folder size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => checkPath(formData.localPath)}
+                    className="px-3.5 py-2 bg-neutral-955 border-t border-b border-r border-neutral-850 hover:bg-neutral-850 text-neutral-400 hover:text-neutral-250 rounded-none text-xs font-bold uppercase transition-colors"
+                    title="Verify Folder Path"
+                  >
+                    {pathStatus === 'checking' ? '...' : 'Verify'}
+                  </button>
+                </div>
+                {pathStatus === 'invalid' && (
+                  <p className="text-[10px] text-red-400 mt-1.5 flex items-center uppercase font-bold tracking-wide">
+                    <AlertCircle size={12} className="mr-1 stroke-[2.5]" /> {pathMessage || 'Path does not exist'}
+                  </p>
+                )}
+                {pathStatus === 'valid' && (
+                  <p className="text-[10px] text-emerald-450 mt-1.5 flex items-center uppercase font-bold tracking-wide">
+                    <CheckCircle size={12} className="mr-1 stroke-[2.5]" /> Valid directory path
+                  </p>
+                )}
+
+                {/* Backup Directory Path Input */}
+                <div className="mt-4 border-t border-neutral-850 pt-4">
+                  <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5">
+                    Backup Directory Path <span className="text-neutral-600 font-normal font-sans">(Optional)</span>
+                  </label>
+                  <div className="flex">
+                    <input
+                      type="text"
+                      name="backupPath"
+                      value={formData.backupPath}
+                      onChange={handleChange}
+                      placeholder="E.G. D:\FTP_Backup (Defaults to local sync_data/history)"
+                      className="flex-1 px-3 py-2 bg-neutral-955 border border-neutral-850 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500/20 rounded-none text-xs text-neutral-200 font-mono outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setBrowserTarget('backup')}
+                      className="px-3 py-2 bg-neutral-955 border-t border-b border-r border-neutral-850 hover:bg-neutral-850 text-neutral-400 rounded-none text-xs transition-colors"
+                      title="Browse Backup Folder"
+                    >
+                      <Folder size={14} />
+                    </button>
+                  </div>
+                  <p className="text-[9px] text-neutral-500 mt-1.5 uppercase font-mono tracking-wide leading-relaxed">
+                    Stores historical versions outside of system C drive to prevent disk space exhaustion.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Row 3: Port & SSL vs Sync Mode & Conflict Resolution */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5">
+                    Port
+                  </label>
+                  <input
+                    type="number"
+                    name="port"
+                    value={formData.port}
+                    onChange={handleChange}
+                    required
+                    className="w-full px-3 py-2 bg-neutral-955 border border-neutral-850 focus:border-orange-500 focus:ring-1 focus:ring-orange-500/20 rounded-none text-xs text-neutral-200 font-mono outline-none"
+                  />
+                  {formData.protocol !== 'sftp' && (
+                    <div className="mt-3 flex items-center">
+                       <input
+                        id="secure"
+                        name="secure"
+                        type="checkbox"
+                        checked={formData.secure}
+                        onChange={handleChange}
+                        className="h-4 w-4 bg-neutral-950 border-neutral-800 text-orange-600 focus:ring-0 focus:ring-offset-0 rounded-none cursor-pointer"
+                      />
+                      <label htmlFor="secure" className="ml-2 block text-xs text-neutral-400 select-none uppercase tracking-wide cursor-pointer font-bold">
+                        Use SSL/TLS (FTPS)
+                      </label>
+                    </div>
+                  )}
+                </div>
+                <div></div>
               </div>
 
-              <div className="mt-4">
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Exclude Paths
-                  <span className="ml-1 text-xs font-normal text-gray-400">
-                    (Visual Diff & Deep Scan)
-                  </span>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5">
+                    Sync Direction Mode
+                  </label>
+                  <select
+                    name="syncMode"
+                    value={formData.syncMode}
+                    onChange={handleChange}
+                    className="w-full px-3 py-2 bg-neutral-955 border border-neutral-850 focus:border-orange-500 focus:ring-1 focus:ring-orange-500/20 rounded-none text-xs text-neutral-250 font-mono outline-none cursor-pointer"
+                  >
+                    <option value="bi_directional">BI-DIRECTIONAL (2-WAY)</option>
+                    <option value="upload_only">UPLOAD ONLY (LOCAL -&gt; FTP)</option>
+                    <option value="download_only">DOWNLOAD ONLY (FTP -&gt; LOCAL)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5">
+                    Conflict Resolution
+                  </label>
+                  <select
+                    name="conflictResolution"
+                    value={formData.conflictResolution}
+                    onChange={handleChange}
+                    className="w-full px-3 py-2 bg-neutral-955 border border-neutral-850 focus:border-orange-500 focus:ring-1 focus:ring-orange-500/20 rounded-none text-xs text-neutral-250 font-mono outline-none cursor-pointer"
+                  >
+                    <option value="overwrite">OVERWRITE (ALWAYS REPLACE)</option>
+                    <option value="newer">OVERWRITE IF NEWER (SOURCE IS NEWER)</option>
+                    <option value="different_size">OVERWRITE IF DIFFERENT SIZE</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {/* Row 4: Username & Password vs Sync Deletions Warning */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5">
+                    Username
+                  </label>
+                  <input
+                    type="text"
+                    name="username"
+                    value={formData.username}
+                    onChange={handleChange}
+                    required
+                    placeholder="USERNAME"
+                    className="w-full px-3 py-2 bg-neutral-955 border border-neutral-850 focus:border-orange-500 focus:ring-1 focus:ring-orange-500/20 rounded-none text-xs text-neutral-200 font-mono outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5">
+                    Password {initialData && <span className="text-neutral-600 font-normal font-sans">(Keep current if blank)</span>}
+                    {!initialData && !formData.privateKey && <span className="text-red-500 ml-1 font-sans">*</span>}
+                  </label>
+                  <input
+                    type="password"
+                    name="password"
+                    value={formData.password}
+                    onChange={handleChange}
+                    required={!initialData && !formData.privateKey}
+                    className={`w-full px-3 py-2 bg-neutral-950 border focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500/20 rounded-none text-xs text-neutral-200 font-mono outline-none ${
+                      !initialData && !formData.privateKey && !formData.password && error ? 'border-red-955 bg-red-955' : 'border-neutral-850'
+                    }`}
+                    placeholder={formData.protocol === 'sftp' && formData.privateKey ? 'PASSPHRASE (OPTIONAL)' : 'PASSWORD'}
+                  />
+                </div>
+              </div>
+
+              <div>
+                {(formData.syncMode === 'bi_directional' || formData.syncMode === 'upload_only') ? (
+                  <div className="flex items-start p-3 bg-red-955/10 border border-red-900/35 rounded-none select-none h-full min-h-[72px]">
+                    <div className="flex items-center h-5">
+                      <input
+                        id="syncDeletions"
+                        name="syncDeletions"
+                        type="checkbox"
+                        checked={formData.syncDeletions}
+                        onChange={handleChange}
+                        className="h-4 w-4 bg-neutral-950 border-neutral-800 text-red-500 focus:ring-0 rounded-none cursor-pointer"
+                      />
+                    </div>
+                    <div className="ml-3 text-xs">
+                      <label htmlFor="syncDeletions" className="font-bold text-red-400 uppercase tracking-wider select-none cursor-pointer">
+                        Sync Deletions (Warning)
+                      </label>
+                      <p className="text-red-500/70 text-[9px] mt-1.5 uppercase leading-relaxed font-bold font-mono">
+                        Warning: Deleting files locally will permanently delete them from the FTP remote node.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="h-full min-h-[72px] border border-dashed border-neutral-800/40 p-3 flex flex-col justify-center items-center text-center select-none">
+                    <span className="text-[9px] font-bold uppercase tracking-widest text-neutral-600 mb-0.5">
+                      Deletions Inactive
+                    </span>
+                    <span className="text-[8px] font-mono text-neutral-700 uppercase">
+                      Not active in download mode
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Row 5: Private Key vs Parallel Connections & Buffer Size */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-4">
+              <div>
+                {formData.protocol === 'sftp' ? (
+                  <div>
+                    <div className="flex justify-between items-center mb-1.5">
+                      <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500">
+                        Private Key <span className="text-neutral-600 font-normal font-sans">(Optional if password is set)</span>
+                      </label>
+                      <label className="text-[9px] font-bold uppercase tracking-wider text-orange-500 hover:text-orange-400 cursor-pointer transition-colors bg-neutral-900 border border-neutral-850 px-2 py-0.5 select-none">
+                        Upload Key File
+                        <input
+                          type="file"
+                          onChange={handleMainKeyUpload}
+                          className="hidden"
+                          accept=".pem,.key,id_rsa,*"
+                        />
+                      </label>
+                    </div>
+                    <textarea
+                      name="privateKey"
+                      value={formData.privateKey || ''}
+                      onChange={(e) => setFormData(prev => ({ ...prev, privateKey: e.target.value }))}
+                      placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                      className="w-full px-3 py-2 bg-neutral-955 border border-neutral-850 focus:border-orange-500 focus:ring-1 focus:ring-orange-500/20 rounded-none h-24 font-mono text-xs text-neutral-300 outline-none resize-none"
+                    />
+                    <p className="text-[10px] text-neutral-500 mt-1 uppercase">Paste OpenSSH private key format here.</p>
+                  </div>
+                ) : (
+                  <div className="h-full min-h-[110px] border border-dashed border-neutral-800/40 p-4 flex flex-col justify-center items-center text-center select-none">
+                    <span className="text-[9px] font-bold uppercase tracking-widest text-neutral-600 mb-1">
+                      Key Auth Offline
+                    </span>
+                    <span className="text-[8px] font-mono text-neutral-700 uppercase">
+                      Only active for SFTP connections
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5">
+                    Parallel Connections
+                  </label>
+                  <input
+                    type="number"
+                    name="parallelConnections"
+                    value={formData.parallelConnections}
+                    onChange={handleChange}
+                    min={1}
+                    max={10}
+                    className="w-full px-3 py-2 bg-neutral-955 border border-neutral-850 focus:border-orange-500 focus:ring-1 focus:ring-orange-500/20 rounded-none text-xs text-neutral-200 font-mono outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5">
+                    Buffer Size
+                  </label>
+                  <select
+                    name="bufferSize"
+                    value={formData.bufferSize}
+                    onChange={handleChange}
+                    className="w-full px-3 py-2 bg-neutral-955 border border-neutral-850 focus:border-orange-500 focus:ring-1 focus:ring-orange-500/20 rounded-none text-xs text-neutral-250 font-mono outline-none cursor-pointer"
+                  >
+                    <option value={4}>4 MB (MINIMAL)</option>
+                    <option value={8}>8 MB (STANDARD)</option>
+                    <option value={16}>16 MB (BALANCED)</option>
+                    <option value={32}>32 MB (PERFORMANCE)</option>
+                    <option value={64}>64 MB (HIGH LOAD)</option>
+                    <option value={128}>128 MB (EXTREME)</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {/* Row 6: Info placeholder vs Exclude Paths */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-4">
+              <div className="h-full min-h-[140px] border border-dashed border-neutral-800/40 p-4 flex flex-col justify-center items-center text-center select-none">
+                <span className="text-[9px] font-bold uppercase tracking-widest text-neutral-600 mb-1">
+                  System Information
+                </span>
+                <span className="text-[8px] font-mono text-neutral-700 uppercase">
+                  All credentials secure and encrypted locally
+                </span>
+              </div>
+
+              <div>
+                <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5">
+                  Exclude Paths (Ignore Patterns)
                 </label>
                 <textarea
                   name="excludePaths"
                   value={formData.excludePaths}
                   onChange={(e) => setFormData(prev => ({ ...prev, excludePaths: e.target.value }))}
-                  placeholder={`vendor
-node_modules
-storage
-build`}
-                  className="w-full h-24 px-3 py-2 text-sm font-mono border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder={`vendor\nnode_modules\nstorage\nbuild`}
+                  className="w-full h-20 px-3 py-2 bg-neutral-955 border border-neutral-850 focus:border-orange-500 focus:ring-1 focus:ring-orange-500/20 rounded-none font-mono text-xs text-neutral-350 outline-none resize-none"
                 />
-                <p className="text-xs text-gray-500 mt-1">
-                  Các folder sẽ bị bỏ qua khi Visual Diff quét. Mỗi pattern một dòng hoặc ngăn cách bằng dấu phẩy.
-                </p>
                 <div className="flex flex-wrap gap-1 mt-2">
                   {['vendor', 'node_modules', 'storage', '.git', 'dist', 'build'].map(p => (
                     <button
@@ -546,7 +759,7 @@ build`}
                           }));
                         }
                       }}
-                      className="px-2 py-0.5 text-xs bg-gray-100 hover:bg-gray-200 text-gray-600 rounded border"
+                      className="px-2 py-0.5 text-[9px] bg-neutral-955 hover:bg-neutral-850 text-neutral-500 hover:text-neutral-300 rounded-none border border-neutral-850 transition-colors uppercase font-mono font-bold"
                     >
                       + {p}
                     </button>
@@ -554,55 +767,13 @@ build`}
                 </div>
               </div>
             </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Local Folder Path (Optional)
-              </label>
-              <div className="flex">
-                <input
-                  type="text"
-                  name="localPath"
-                  value={formData.localPath}
-                  onChange={handleChange}
-                  placeholder="E.g. D:\Projects\MySite"
-                  className={`flex-1 px-3 py-2 border rounded-l-md focus:outline-none focus:ring-2 focus:ring-blue-500 ${pathStatus === 'invalid' ? 'border-red-300 bg-red-50' :
-                    pathStatus === 'valid' ? 'border-green-300 bg-green-50' : 'border-gray-300'
-                    }`}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowBrowser(true)}
-                  className="px-3 py-2 bg-gray-100 border-t border-b border-gray-300 hover:bg-gray-200 text-gray-600 border-l-0"
-                  title="Browse Folder"
-                >
-                  <Folder size={16} />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => checkPath(formData.localPath)}
-                  className="px-3 py-2 bg-gray-100 border border-l-0 border-gray-300 rounded-r-md hover:bg-gray-200 text-gray-600"
-                  title="Check if path exists"
-                >
-                  {pathStatus === 'checking' ? '...' : 'Check'}
-                </button>
-              </div>
-              {pathStatus === 'invalid' && (
-                <p className="text-xs text-red-500 mt-1 flex items-center">
-                  <AlertCircle size={12} className="mr-1" /> {pathMessage || 'Invalid path'}
-                </p>
-              )}
-              {pathStatus === 'valid' && (
-                <p className="text-xs text-green-600 mt-1 flex items-center">
-                  <CheckCircle size={12} className="mr-1" /> Valid directory
-                </p>
-              )}
-            </div>
           </div>
+
+
 
           {/* Ignore Patterns Section - Only show when editing */}
           {initialData && (
-            <div className="border border-gray-200 rounded-md overflow-hidden">
+            <div className="border border-neutral-850 rounded-none overflow-hidden mt-2">
               <button
                 type="button"
                 onClick={() => {
@@ -611,23 +782,23 @@ build`}
                     loadIgnorePatterns();
                   }
                 }}
-                className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors"
+                className="w-full flex items-center justify-between px-4 py-3 bg-neutral-955 hover:bg-neutral-900 transition-colors border-b border-neutral-850 select-none"
               >
                 <div className="flex items-center space-x-2">
-                  <FileText size={16} className="text-gray-500" />
-                  <span className="font-medium text-gray-700">Ignore Patterns (.ftpignore)</span>
+                  <FileText size={14} className="text-neutral-500 animate-signal" />
+                  <span className="font-bold text-neutral-400 text-xs uppercase tracking-wider">[MODULE_RULES] // Ignore Patterns (.ftpignore)</span>
                 </div>
-                {showIgnoreSection ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                {showIgnoreSection ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
               </button>
 
               {showIgnoreSection && (
-                <div className="p-4 border-t border-gray-200 bg-white">
+                <div className="p-4 bg-neutral-950/40">
                   {ignoreLoading ? (
-                    <div className="text-center py-4 text-gray-500">Loading...</div>
+                    <div className="text-center py-4 text-neutral-600 text-xs animate-pulse font-bold uppercase">LOADING_RULES...</div>
                   ) : (
                     <>
-                      <p className="text-xs text-gray-500 mb-2">
-                        Syntax giống .gitignore. Mỗi pattern một dòng. Dòng bắt đầu # là comment.
+                      <p className="text-[9px] text-neutral-500 mb-2 uppercase">
+                        Uses gitignore syntax guidelines. One pattern per line.
                       </p>
                       <textarea
                         value={ignorePatterns}
@@ -636,22 +807,23 @@ build`}
                           setIgnoreSaveStatus('idle');
                         }}
                         placeholder={`# Example patterns:\n*.log\nnode_modules/\n*.tmp\n.git/`}
-                        className="w-full h-40 px-3 py-2 font-mono text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        className="w-full h-32 px-3 py-2 bg-neutral-950 border border-neutral-850 focus:border-orange-500 focus:ring-1 focus:ring-orange-500/20 rounded-none font-mono text-xs text-neutral-300 outline-none resize-none"
                       />
-                      <div className="flex items-center justify-between mt-2">
-                        <div className="text-xs text-gray-400">
-                          Patterns: *.log, node_modules/, *.tmp, !important.log
+                      <div className="flex items-center justify-between mt-2.5">
+                        <div className="text-[9px] text-neutral-600 uppercase font-bold">
+                          Supported matches: *.log, node_modules/, *.tmp
                         </div>
                         <button
                           type="button"
                           onClick={saveIgnorePatterns}
                           disabled={ignoreSaveStatus === 'saving'}
-                          className={`px-3 py-1.5 text-sm font-medium rounded-md ${ignoreSaveStatus === 'saved'
-                            ? 'bg-green-100 text-green-700'
-                            : ignoreSaveStatus === 'error'
-                              ? 'bg-red-100 text-red-700'
-                              : 'bg-blue-600 text-white hover:bg-blue-700'
-                            }`}
+                          className={`px-3 py-1.5 text-xs font-bold rounded-none border transition-colors uppercase tracking-wider ${
+                            ignoreSaveStatus === 'saved'
+                              ? 'bg-emerald-950/30 text-emerald-400 border-emerald-800'
+                              : ignoreSaveStatus === 'error'
+                                ? 'bg-red-950/30 text-red-400 border-red-800'
+                                : 'bg-neutral-950 text-neutral-300 border-neutral-850 hover:bg-neutral-900'
+                          }`}
                         >
                           {ignoreSaveStatus === 'saving' ? 'Saving...' :
                             ignoreSaveStatus === 'saved' ? 'Saved!' :
@@ -665,39 +837,44 @@ build`}
             </div>
           )}
 
-          <div className="flex justify-between items-center pt-2">
-            <div className="flex items-center space-x-2">
+          {/* Form Actions Footer */}
+          <div className="flex flex-col sm:flex-row justify-between items-stretch sm:items-center pt-4 border-t border-neutral-850 gap-4">
+            <div className="flex items-center gap-3">
               <button
                 type="button"
                 onClick={handleTest}
                 disabled={testStatus === 'testing' || !formData.server}
-                className={`px-3 py-2 text-sm font-medium rounded-md border ${testStatus === 'success' ? 'bg-green-50 text-green-700 border-green-200' :
-                  testStatus === 'error' ? 'bg-red-50 text-red-700 border-red-200' :
-                    'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
-                  }`}
+                className={`px-4 py-2.5 text-xs font-bold rounded-none border transition-colors uppercase tracking-wider text-center ${
+                  testStatus === 'testing' ? 'bg-neutral-950 text-neutral-500 border-neutral-850 cursor-not-allowed' :
+                  testStatus === 'success' ? 'bg-emerald-950/30 text-emerald-400 border-emerald-800 hover:bg-emerald-900/30' :
+                  testStatus === 'error' ? 'bg-red-950/30 text-red-400 border-red-800 hover:bg-red-900/30' :
+                  'bg-neutral-950 text-neutral-300 border-neutral-850 hover:bg-neutral-900 hover:text-neutral-200'
+                }`}
               >
                 {testStatus === 'testing' ? 'Testing...' : 'Test Connection'}
               </button>
               {testMessage && (
-                <span className={`text-xs ${testStatus === 'success' ? 'text-green-600' : testStatus === 'error' ? 'text-red-600' : 'text-gray-500'}`}>
-                  {testMessage}
+                <span className={`text-[10px] font-bold uppercase font-mono ${
+                  testStatus === 'success' ? 'text-emerald-400' : testStatus === 'error' ? 'text-red-400' : 'text-neutral-500'
+                }`}>
+                  // {testMessage}
                 </span>
               )}
             </div>
-            <div className="flex space-x-2">
+            <div className="flex space-x-2.5 self-stretch sm:self-auto justify-end">
               <button
                 type="button"
                 onClick={onCancel}
-                className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+                className="px-4 py-2.5 text-xs font-bold text-neutral-450 bg-neutral-900 border border-neutral-850 rounded-none hover:bg-neutral-800 hover:text-neutral-200 transition-colors uppercase tracking-wider"
               >
-                Cancel
+                [ABORT_CHANGES]
               </button>
               <button
                 type="submit"
                 disabled={loading}
-                className="flex items-center px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50"
+                className="flex items-center justify-center px-4 py-2.5 text-xs font-bold text-black bg-orange-600 border border-orange-700 hover:bg-orange-500 rounded-none transition-colors uppercase tracking-wider disabled:opacity-40"
               >
-                <Save size={16} className="mr-2" />
+                <Save size={14} className="mr-2" />
                 {loading ? 'Saving...' : 'Save Connection'}
               </button>
             </div>

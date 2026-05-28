@@ -1,0 +1,7 @@
+[package]
+name = "local_scanner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Zero third-party dependencies to ensure offline compilation readiness and speed.

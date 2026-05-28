@@ -1,5 +1,5 @@
 import React from 'react';
-import { Upload, Clock, Zap } from 'lucide-react';
+import { Upload, Clock, Zap, Loader } from 'lucide-react';
 
 interface UploadProgress {
     filename: string;
@@ -15,6 +15,12 @@ interface OverallProgress {
     queueLength: number;
     totalFilesInBatch: number;
     completedFiles: number;
+    filesUploaded?: number;
+    filesSkipped?: number;
+    filesDeleted?: number;
+    filesFailed?: number;
+    uploadSpeedMBps?: number;
+    downloadSpeedMBps?: number;
 }
 
 interface Props {
@@ -42,6 +48,19 @@ const UploadProgressBar: React.FC<Props> = ({ progress }) => {
 
     // No uploads in progress
     if (activeUploads.length === 0 && queueLength === 0) {
+        if (totalFilesInBatch === 0) {
+            return (
+                <div className="bg-neutral-950 p-3 mb-3 border border-neutral-800 rounded-none font-mono text-xs animate-pulse">
+                    <div className="flex items-center justify-between text-neutral-500 uppercase tracking-wide">
+                        <div className="flex items-center text-orange-500 font-bold">
+                            <Loader size={13} className="mr-1.5 animate-spin text-orange-500" />
+                            <span>Sync_Active</span>
+                        </div>
+                        <span>Scanning directories...</span>
+                    </div>
+                </div>
+            );
+        }
         return null;
     }
 
@@ -50,87 +69,113 @@ const UploadProgressBar: React.FC<Props> = ({ progress }) => {
         ? Math.round((completedFiles / totalFilesInBatch) * 100)
         : 0;
 
-    // Calculate average speed across all active uploads
-    const avgSpeed = activeUploads.length > 0
-        ? activeUploads.reduce((sum, u) => sum + u.speedMBps, 0) / activeUploads.length
-        : 0;
+    // Calculate display speed (use session-level rolling bandwidth if available)
+    const displaySpeed = progress.uploadSpeedMBps !== undefined
+        ? progress.uploadSpeedMBps
+        : (activeUploads.length > 0
+            ? activeUploads.reduce((sum, u) => sum + u.speedMBps, 0) / activeUploads.length
+            : 0);
 
     return (
-        <div className="bg-gradient-to-r from-blue-900/90 to-indigo-900/90 rounded-lg p-3 mb-3 border border-blue-700/50 backdrop-blur-sm">
+        <div className="bg-neutral-950 p-3 mb-3 border border-neutral-800 rounded-none font-mono text-xs">
             {/* Header */}
-            <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center text-blue-100 font-medium text-sm">
-                    <Upload size={14} className="mr-2 animate-pulse" />
-                    <span>Uploading...</span>
+            <div className="flex items-center justify-between mb-2 border-b border-neutral-850 pb-2">
+                <div className="flex items-center text-orange-500 font-bold text-xs uppercase tracking-wider">
+                    <Upload size={13} className="mr-1.5 animate-pulse" />
+                    <span>Upload_Active</span>
                 </div>
-                <div className="flex items-center space-x-3 text-xs">
-                    {avgSpeed > 0 && (
-                        <div className="flex items-center text-green-400">
-                            <Zap size={12} className="mr-1" />
-                            <span>{avgSpeed.toFixed(2)} MB/s</span>
+                <div className="flex items-center space-x-3 text-[10px]">
+                    {displaySpeed > 0 && (
+                        <div className="flex items-center text-emerald-400 font-bold">
+                            <Zap size={11} className="mr-1" />
+                            <span>{displaySpeed.toFixed(2)} MB/S</span>
                         </div>
                     )}
-                    <div className="text-blue-300">
-                        {completedFiles}/{totalFilesInBatch} files
+                    <div className="text-neutral-500">
+                        {completedFiles}/{totalFilesInBatch} FILES
                     </div>
                 </div>
             </div>
 
             {/* Active uploads */}
-            {activeUploads.map((upload, index) => (
-                <div key={index} className="mb-2 last:mb-0">
-                    <div className="flex items-center justify-between text-xs mb-1">
-                        <span className="text-gray-300 truncate max-w-[200px]" title={upload.filename}>
-                            {upload.filename}
-                        </span>
-                        <div className="flex items-center space-x-2 text-gray-400">
-                            <span>{upload.percent}%</span>
-                            <span className="text-gray-500">•</span>
-                            <span>{formatBytes(upload.bytesTransferred)}/{formatBytes(upload.totalBytes)}</span>
-                            {upload.etaSeconds > 0 && (
-                                <>
-                                    <span className="text-gray-500">•</span>
-                                    <div className="flex items-center text-yellow-400">
-                                        <Clock size={10} className="mr-1" />
-                                        <span>{formatETA(upload.etaSeconds)}</span>
-                                    </div>
-                                </>
-                            )}
+            <div className="max-h-28 overflow-y-auto custom-scrollbar space-y-3 mb-2.5 pr-1">
+                {activeUploads.map((upload, index) => (
+                    <div key={index}>
+                        <div className="flex items-center justify-between text-[11px] mb-1">
+                            <span className="text-neutral-300 truncate max-w-[200px] uppercase font-bold" title={upload.filename}>
+                                {upload.filename}
+                            </span>
+                            <div className="flex items-center space-x-2 text-neutral-500 font-mono">
+                                <span className="text-neutral-300 font-bold">{upload.percent}%</span>
+                                <span>/</span>
+                                <span>{formatBytes(upload.bytesTransferred)} OF {formatBytes(upload.totalBytes)}</span>
+                                {upload.etaSeconds > 0 && (
+                                    <>
+                                        <span>/</span>
+                                        <div className="flex items-center text-amber-500">
+                                            <Clock size={10} className="mr-1" />
+                                            <span>ETA: {formatETA(upload.etaSeconds)}</span>
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Progress bar */}
+                        <div className="h-1.5 bg-neutral-900 border border-neutral-850 rounded-none overflow-hidden">
+                            <div
+                                className="h-full bg-orange-600 rounded-none transition-all duration-350 ease-out"
+                                style={{ width: `${upload.percent}%` }}
+                            />
                         </div>
                     </div>
-
-                    {/* Progress bar */}
-                    <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden">
-                        <div
-                            className="h-full bg-gradient-to-r from-blue-400 to-cyan-400 rounded-full transition-all duration-300 ease-out"
-                            style={{ width: `${upload.percent}%` }}
-                        />
-                    </div>
-                </div>
-            ))}
+                ))}
+            </div>
 
             {/* Queue indicator */}
             {queueLength > 0 && (
-                <div className="mt-2 pt-2 border-t border-blue-700/50 text-xs text-gray-400">
-                    <span className="text-yellow-400">{queueLength}</span> file(s) waiting in queue
+                <div className="mt-2.5 pt-2.5 border-t border-neutral-850 text-[10px] text-neutral-500 uppercase tracking-wide">
+                    <span className="text-orange-500 font-bold">{queueLength}</span> file(s) waiting in upload queue
                 </div>
             )}
 
             {/* Batch progress bar (when multiple files) */}
             {totalFilesInBatch > 1 && (
-                <div className="mt-2 pt-2 border-t border-blue-700/50">
-                    <div className="flex items-center justify-between text-xs text-gray-400 mb-1">
-                        <span>Overall Progress</span>
-                        <span>{batchProgress}%</span>
+                <div className="mt-2.5 pt-2.5 border-t border-neutral-850">
+                    <div className="flex items-center justify-between text-[10px] text-neutral-500 mb-1 uppercase font-bold tracking-wide">
+                        <span>Overall Batch Progress</span>
+                        <span className="text-emerald-400">{batchProgress}%</span>
                     </div>
-                    <div className="h-1 bg-gray-700 rounded-full overflow-hidden">
+                    <div className="h-1 bg-neutral-900 border border-neutral-850 rounded-none overflow-hidden">
                         <div
-                            className="h-full bg-gradient-to-r from-green-400 to-emerald-400 rounded-full transition-all duration-300"
+                            className="h-full bg-emerald-500 rounded-none transition-all duration-350"
                             style={{ width: `${batchProgress}%` }}
                         />
                     </div>
                 </div>
             )}
+
+            {/* Sync statistics counters */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2.5 pt-2.5 border-t border-neutral-850 text-[10px] text-neutral-500 uppercase tracking-wide">
+                <div className="flex items-center">
+                    <span className="text-neutral-600 mr-1.5">UPLOADED:</span>
+                    <span className="text-emerald-400 font-bold font-mono">{progress.filesUploaded || 0}</span>
+                </div>
+                <div className="flex items-center">
+                    <span className="text-neutral-600 mr-1.5">SKIPPED:</span>
+                    <span className="text-neutral-350 font-bold font-mono">{progress.filesSkipped || 0}</span>
+                </div>
+                <div className="flex items-center">
+                    <span className="text-neutral-600 mr-1.5">DELETED:</span>
+                    <span className="text-red-400 font-bold font-mono">{progress.filesDeleted || 0}</span>
+                </div>
+                <div className="flex items-center">
+                    <span className="text-neutral-600 mr-1.5">FAILED:</span>
+                    <span className={`font-bold font-mono ${(progress.filesFailed || 0) > 0 ? 'text-red-500 animate-pulse' : 'text-neutral-300'}`}>
+                        {progress.filesFailed || 0}
+                    </span>
+                </div>
+            </div>
         </div>
     );
 };

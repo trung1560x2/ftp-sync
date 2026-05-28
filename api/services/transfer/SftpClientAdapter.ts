@@ -1,7 +1,7 @@
 
 import SftpClient from 'ssh2-sftp-client';
 import { TransferClient, ConnectOptions, FileStats } from './TransferClient.js';
-import { Readable } from 'stream';
+import { Readable, Writable } from 'stream';
 import path from 'path';
 import fs from 'fs-extra';
 
@@ -71,28 +71,52 @@ export class SftpClientAdapter implements TransferClient {
         }
     }
 
-    async uploadFrom(source: Readable | string, remotePath: string): Promise<void> {
-        const options = this.progressHandler ? {
-            step: (total_transferred: number, chunk: number, total: number) => {
+    async uploadFrom(source: Readable | string, remotePath: string, options?: { localStart?: number }): Promise<void> {
+        const localStart = options?.localStart || 0;
+        const sftpOptions: any = this.progressHandler ? {
+            step: (total_transferred: number) => {
                 this.progressHandler!({ bytes: total_transferred, name: path.basename(remotePath) });
             }
-        } : undefined;
+        } : {};
 
-        if (typeof source === 'string') {
-            await this.client.put(source, remotePath, options as any);
-        } else {
-            await this.client.put(source, remotePath, options as any);
+        if (localStart > 0) {
+            sftpOptions.writeStreamOptions = {
+                flags: 'r+',
+                start: localStart
+            };
         }
+
+        let finalSource = source;
+        if (localStart > 0 && typeof source === 'string') {
+            finalSource = fs.createReadStream(source, { start: localStart });
+        }
+
+        await this.client.put(finalSource, remotePath, sftpOptions);
     }
 
-    async downloadTo(localPath: string, remotePath: string): Promise<void> {
-        const options = this.progressHandler ? {
-            step: (total_transferred: number, chunk: number, total: number) => {
+    async downloadTo(destination: string | Writable, remotePath: string, startAt?: number): Promise<void> {
+        const offset = startAt || 0;
+        const sftpOptions: any = this.progressHandler ? {
+            step: (total_transferred: number) => {
                 this.progressHandler!({ bytes: total_transferred, name: path.basename(remotePath) });
             }
-        } : undefined;
+        } : {};
 
-        await this.client.fastGet(remotePath, localPath, options as any);
+        if (offset > 0) {
+            sftpOptions.readStreamOptions = { start: offset };
+            if (typeof destination === 'string') {
+                const writeStream = fs.createWriteStream(destination, { flags: 'r+', start: offset });
+                await this.client.get(remotePath, writeStream, sftpOptions);
+            } else {
+                await this.client.get(remotePath, destination, sftpOptions);
+            }
+        } else {
+            if (typeof destination === 'string') {
+                await this.client.fastGet(remotePath, destination, sftpOptions);
+            } else {
+                await this.client.get(remotePath, destination, sftpOptions);
+            }
+        }
     }
 
     async ensureDir(remotePath: string): Promise<void> {
@@ -139,7 +163,12 @@ export class SftpClientAdapter implements TransferClient {
     async checkConnection(): Promise<boolean> {
         if (this._closed) return false;
         try {
-            await this.client.cwd();
+            // Race with a 2-second timeout to prevent dead/half-open sockets from hanging the main thread
+            const check = this.client.cwd();
+            const timeout = new Promise<never>((_, reject) => 
+                setTimeout(() => reject(new Error('Connection check timeout')), 2000)
+            );
+            await Promise.race([check, timeout]);
             return true;
         } catch {
             return false;

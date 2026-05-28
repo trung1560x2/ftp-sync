@@ -19,6 +19,8 @@ import systemRoutes from './routes/system.js'
 import reportRoutes from './routes/reports.js'
 import deploymentRoutes from './routes/deployment.js'
 import contentDiffRoutes from './routes/contentDiff.js'
+import aiRoutes from './routes/ai.js'
+import { logStore } from './services/LogStore.js'
 
 // for esm mode
 const __filename = fileURLToPath(import.meta.url)
@@ -48,13 +50,14 @@ app.use('/api/system', systemRoutes)
 app.use('/api/reports', reportRoutes)
 app.use('/api/deployment', deploymentRoutes)
 app.use('/api/content-diff', contentDiffRoutes)
+app.use('/api/ai', aiRoutes)
 
 /**
  * health
  */
 app.use(
   '/api/health',
-  (req: Request, res: Response, next: NextFunction): void => {
+  (req: Request, res: Response): void => {
     res.status(200).json({
       success: true,
       message: 'ok',
@@ -65,7 +68,7 @@ app.use(
 /**
  * error handler middleware
  */
-app.use((error: Error, req: Request, res: Response, next: NextFunction) => {
+app.use((error: Error, req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({
     success: false,
     error: 'Server internal error',
@@ -85,5 +88,26 @@ app.use((req: Request, res: Response) => {
     res.sendFile(path.join(distPath, 'index.html'))
   }
 })
+
+// Shutdown hooks for emergency log flush
+process.on('SIGINT', () => {
+  console.log('SIGINT received. Flushing logs synchronously before exit...');
+  try {
+    logStore.flushSync();
+  } catch (e) {
+    console.error('Failed to flush logs on SIGINT', e);
+  }
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received. Flushing logs synchronously before exit...');
+  try {
+    logStore.flushSync();
+  } catch (e) {
+    console.error('Failed to flush logs on SIGTERM', e);
+  }
+  process.exit(0);
+});
 
 export default app

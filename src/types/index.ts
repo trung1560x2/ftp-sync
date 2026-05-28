@@ -6,6 +6,7 @@ export interface FTPConnection {
   username: string;
   target_directory: string;
   local_path?: string;
+  backup_path?: string;
   sync_mode?: 'bi_directional' | 'upload_only' | 'download_only';
   secure?: boolean;
   sync_deletions?: boolean;
@@ -15,6 +16,11 @@ export interface FTPConnection {
   private_key?: string;
   conflict_resolution?: 'overwrite' | 'newer' | 'different_size';
   exclude_paths?: string; // Comma or newline separated patterns to exclude from sync/diff
+  last_sync_time?: number;
+  last_sync_duration?: number;
+  last_sync_status?: 'success' | 'failed';
+  validation_status?: 'verified' | 'failed' | 'unverified';
+  validation_message?: string;
   created_at: string;
 }
 
@@ -26,6 +32,7 @@ export interface FTPConnectionFormData {
   password?: string;
   targetDirectory: string;
   localPath: string;
+  backupPath: string;
   syncMode: 'bi_directional' | 'upload_only' | 'download_only';
   secure: boolean;
   syncDeletions: boolean;

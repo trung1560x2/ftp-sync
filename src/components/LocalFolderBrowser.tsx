@@ -99,21 +99,24 @@ const LocalFolderBrowser: React.FC<Props> = ({ onSelect, onClose }) => {
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60] p-4">
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-lg h-[600px] flex flex-col">
-        <div className="p-4 border-b border-gray-200 flex justify-between items-center bg-gray-50 rounded-t-lg">
-          <h3 className="font-semibold text-gray-800">Browse Local Folder</h3>
-          <button onClick={onClose}><X size={20} className="text-gray-500" /></button>
+    <div className="fixed inset-0 bg-neutral-950/80 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
+      <div className="bg-neutral-900 border border-neutral-800 w-full max-w-lg h-[600px] flex flex-col rounded-none text-neutral-200 font-mono">
+        <div className="p-4 border-b border-neutral-800 flex justify-between items-center bg-neutral-950">
+          <h3 className="font-bold text-xs uppercase tracking-widest text-neutral-100 flex items-center gap-2">
+            <span className="w-1.5 h-3 bg-orange-500 block animate-signal"></span>
+            Browse Local Folder
+          </h3>
+          <button onClick={onClose}><X size={16} className="text-neutral-500 hover:text-neutral-300 transition-colors" /></button>
         </div>
 
-        <div className="p-3 border-b border-gray-100 flex gap-2">
+        <div className="p-3 border-b border-neutral-850 flex gap-2 bg-neutral-900/50">
            <select 
-             className="border border-gray-300 rounded px-2 py-1 text-sm bg-white"
+             className="border border-neutral-800 px-2 py-1 text-xs bg-neutral-950 text-neutral-300 focus:outline-none focus:border-orange-500 font-mono rounded-none uppercase cursor-pointer"
              onChange={handleDriveChange}
              value={drives.find(d => currentPath.startsWith(d.name))?.path || ''}
            >
              {drives.map(d => (
-               <option key={d.name} value={d.path}>{d.description}</option>
+               <option key={d.name} value={d.path} className="bg-neutral-950">{d.description}</option>
              ))}
            </select>
            <form 
@@ -125,20 +128,20 @@ const LocalFolderBrowser: React.FC<Props> = ({ onSelect, onClose }) => {
            >
              <input 
                type="text" 
-               className="flex-1 border border-gray-300 rounded px-2 py-1 text-sm bg-white text-gray-700"
+               className="flex-1 bg-neutral-950 border border-neutral-850 rounded-none px-2 py-1 text-xs text-neutral-200 focus:outline-none focus:border-orange-500 font-mono"
                value={currentPath}
                onChange={(e) => setCurrentPath(e.target.value)}
-               placeholder="Enter path..."
+               placeholder="ENTER_ABSOLUTE_PATH..."
              />
-             <button type="submit" className="bg-blue-600 text-white px-3 py-1 rounded text-sm hover:bg-blue-700">
+             <button type="submit" className="bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 text-neutral-300 px-3 py-1 rounded-none text-xs font-bold uppercase transition-colors">
                Go
              </button>
            </form>
-        </div>
+         </div>
 
-        <div className="flex-1 overflow-y-auto p-2">
+        <div className="flex-1 overflow-y-auto p-2 custom-scrollbar bg-neutral-950/20">
            {loading ? (
-             <div className="text-center py-10 text-gray-400">Loading...</div>
+             <div className="text-center py-10 text-neutral-600 text-xs">LOADING_DIRECTORIES...</div>
            ) : (
              <ul className="space-y-1">
                {/* Parent Directory Link */}
@@ -146,16 +149,14 @@ const LocalFolderBrowser: React.FC<Props> = ({ onSelect, onClose }) => {
                    <li>
                      <button 
                        onClick={() => {
-                          // Naive parent implementation
                           const sep = currentPath.includes('\\') ? '\\' : '/';
                           const parent = currentPath.substring(0, currentPath.lastIndexOf(sep));
-                          // Handle C:\ vs C:\Folder
                           const target = parent.endsWith(':') ? parent + sep : (parent || sep);
                           fetchDir(target);
                        }}
-                       className="w-full flex items-center p-2 rounded hover:bg-gray-100 text-left text-gray-600"
+                       className="w-full flex items-center p-2 hover:bg-neutral-850/40 text-left text-neutral-400 text-xs border border-transparent hover:border-neutral-800 transition-all rounded-none"
                      >
-                       <ArrowLeft size={16} className="mr-2" /> .. (Parent)
+                       <ArrowLeft size={14} className="mr-2" /> .. (PARENT_DIR)
                      </button>
                    </li>
                )}
@@ -164,32 +165,32 @@ const LocalFolderBrowser: React.FC<Props> = ({ onSelect, onClose }) => {
                  <li key={i}>
                    <button
                      onClick={() => fetchDir(folder.path)}
-                     className="w-full flex items-center p-2 rounded hover:bg-blue-50 text-left group"
+                     className="w-full flex items-center p-2 hover:bg-neutral-850/40 text-left text-neutral-300 text-xs border border-transparent hover:border-neutral-800 transition-all rounded-none"
                    >
-                     <Folder size={18} className="text-yellow-500 mr-3 flex-shrink-0" />
-                     <span className="truncate text-sm text-gray-700">{folder.name}</span>
+                     <Folder size={14} className="text-orange-500 mr-3 flex-shrink-0" />
+                     <span className="truncate">{folder.name}</span>
                    </button>
                  </li>
                ))}
                {folders.length === 0 && (
-                 <div className="text-center py-10 text-gray-400 text-sm">Empty folder</div>
+                 <div className="text-center py-10 text-neutral-650 text-xs">EMPTY_DIRECTORY</div>
                )}
              </ul>
            )}
         </div>
 
-        <div className="p-4 border-t border-gray-200 bg-gray-50 rounded-b-lg flex justify-end">
+        <div className="p-4 border-t border-neutral-850 bg-neutral-950 flex justify-end">
            <button 
              onClick={onClose}
-             className="px-4 py-2 mr-2 text-sm text-gray-600 hover:text-gray-800"
+             className="px-4 py-2 mr-2.5 text-xs text-neutral-400 hover:text-neutral-200 uppercase font-bold"
            >
              Cancel
            </button>
            <button 
              onClick={() => onSelect(currentPath)}
-             className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded hover:bg-blue-700 flex items-center"
+             className="px-4 py-2 text-xs font-bold text-black bg-orange-600 border border-orange-700 hover:bg-orange-500 rounded-none flex items-center uppercase tracking-wider transition-colors"
            >
-             <Check size={16} className="mr-2" /> Select This Folder
+             <Check size={14} className="mr-1.5 stroke-[2.5]" /> Select Folder
            </button>
         </div>
       </div>

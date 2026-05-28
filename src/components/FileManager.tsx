@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { X, Upload, Folder, File, RefreshCw, ArrowLeft, Download, CloudUpload, Play } from 'lucide-react';
+import { X, Upload, Folder, File as FileIcon, RefreshCw, ArrowLeft, Download, CloudUpload, Play } from 'lucide-react';
+import ConflictResolverModal from './ConflictResolverModal';
 
 interface Props {
   connectionId: number;
@@ -23,10 +24,325 @@ const FileManager: React.FC<Props> = ({ connectionId, serverName, onClose }) => 
   const [uploading, setUploading] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
+  // Drag & drop state
+  const [dragOverRemote, setDragOverRemote] = useState(false);
+  const [dragOverLocal, setDragOverLocal] = useState(false);
+  
+  // Conflict resolver state
+  const [showConflictModal, setShowConflictModal] = useState(false);
+  const [conflicts, setConflicts] = useState<string[]>([]);
+  const [pendingDropItems, setPendingDropItems] = useState<{ name: string; path: string; isDirectory: boolean; file?: File }[]>([]);
+  const [dropTargetPanel, setDropTargetPanel] = useState<'remote' | 'local'>('local');
+
   useEffect(() => {
     fetchRemoteFiles();
     fetchLocalFiles();
   }, [connectionId]);
+
+  const parseDroppedItems = async (dataTransfer: DataTransfer): Promise<{ name: string; path: string; isDirectory: boolean; file?: File }[]> => {
+    const items = Array.from(dataTransfer.items || []);
+    const parsed: { name: string; path: string; isDirectory: boolean; file?: File }[] = [];
+
+    for (const item of items) {
+      if (item.kind !== 'file') continue;
+      const entry = item.webkitGetAsEntry();
+      if (entry) {
+        const fileObj = item.getAsFile();
+        parsed.push({
+          name: entry.name,
+          path: (fileObj as any)?.path || entry.name, // Electron has .path
+          isDirectory: entry.isDirectory,
+          file: fileObj || undefined
+        });
+      }
+    }
+    return parsed;
+  };
+
+  const handleDropToPanel = async (e: React.DragEvent, target: 'local' | 'remote') => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    if (target === 'local') setDragOverLocal(false);
+    else setDragOverRemote(false);
+
+    // 1. Check if this is an internal drag from the other panel
+    const dragDataRaw = e.dataTransfer.getData('application/json');
+    if (dragDataRaw) {
+      try {
+        const dragData = JSON.parse(dragDataRaw);
+        if (dragData.source && dragData.file) {
+          const { source, file } = dragData;
+          if (source === 'remote' && target === 'local') {
+            // Dragged remote file to local!
+            const hasConflict = localFiles.some(f => f.name.toLowerCase() === file.name.toLowerCase());
+            if (hasConflict) {
+              setPendingDropItems([{ name: file.name, path: file.path || '', isDirectory: file.isDirectory }]);
+              setConflicts([file.name]);
+              setDropTargetPanel('local');
+              setShowConflictModal(true);
+            } else {
+              handleManualDownload(file);
+            }
+            return;
+          } else if (source === 'local' && target === 'remote') {
+            // Dragged local file to remote!
+            const hasConflict = remoteFiles.some(f => f.name.toLowerCase() === file.name.toLowerCase());
+            if (hasConflict) {
+              setPendingDropItems([{ name: file.name, path: file.path || '', isDirectory: file.isDirectory }]);
+              setConflicts([file.name]);
+              setDropTargetPanel('remote');
+              setShowConflictModal(true);
+            } else {
+              handleManualUpload(file);
+              setTimeout(() => fetchRemoteFiles(currentRemotePath), 1000);
+            }
+            return;
+          }
+        }
+      } catch (err) {
+        console.error('Error parsing drag data', err);
+      }
+    }
+
+    // 2. Drop from OS
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const parsedItems = await parseDroppedItems(e.dataTransfer);
+      if (parsedItems.length === 0) return;
+
+      const targetFiles = target === 'local' ? localFiles : remoteFiles;
+      const conflictingNames: string[] = [];
+      
+      parsedItems.forEach(item => {
+        const conflictExists = targetFiles.some(tf => tf.name.toLowerCase() === item.name.toLowerCase());
+        if (conflictExists) {
+          conflictingNames.push(item.name);
+        }
+      });
+
+      if (conflictingNames.length > 0) {
+        setPendingDropItems(parsedItems);
+        setConflicts(conflictingNames);
+        setDropTargetPanel(target);
+        setShowConflictModal(true);
+      } else {
+        const emptyResolutions = {};
+        executeTransfer(parsedItems, emptyResolutions, target);
+      }
+    }
+  };
+
+  const handleResolveConflicts = (resolutions: { [filename: string]: 'overwrite' | 'skip' | 'rename' }) => {
+    setShowConflictModal(false);
+    executeTransfer(pendingDropItems, resolutions, dropTargetPanel);
+    setPendingDropItems([]);
+    setConflicts([]);
+  };
+
+  const executeTransfer = async (
+    itemsToTransfer: { name: string; path: string; isDirectory: boolean; file?: File }[],
+    resolutions: { [filename: string]: 'overwrite' | 'skip' | 'rename' },
+    target: 'remote' | 'local'
+  ) => {
+    const finalItems = itemsToTransfer
+      .map(item => {
+        const resolution = resolutions[item.name];
+        if (resolution === 'skip') return null;
+
+        let destName = item.name;
+        if (resolution === 'rename') {
+          const lastDot = item.name.lastIndexOf('.');
+          if (lastDot > 0 && !item.isDirectory) {
+            const base = item.name.substring(0, lastDot);
+            const ext = item.name.substring(lastDot);
+            destName = `${base}_copy${ext}`;
+          } else {
+            destName = `${item.name}_copy`;
+          }
+        }
+
+        return { ...item, destName };
+      })
+      .filter((item): item is { name: string; path: string; isDirectory: boolean; destName: string; file?: File } => item !== null);
+
+    if (finalItems.length === 0) return;
+
+    if (target === 'local') {
+      setUploading(true);
+
+      const internalDragFromRemote = finalItems.some(i => !i.file && i.path.startsWith('/'));
+
+      if (internalDragFromRemote) {
+        try {
+          for (const item of finalItems) {
+            await fetch('/api/sync/download-file', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: connectionId, remotePath: item.path })
+            });
+          }
+          fetchLocalFiles();
+        } catch (err) {
+          console.error('Remote-to-local drop failed', err);
+        } finally {
+          setUploading(false);
+        }
+        return;
+      }
+
+      const hasPaths = finalItems.every(item => item.path && item.path !== item.name);
+
+      if (hasPaths) {
+        try {
+          await fetch(`/api/files/import-local/${connectionId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              items: finalItems.map(i => ({ srcPath: i.path, destName: i.destName })),
+              subDir: ''
+            })
+          });
+          fetchLocalFiles();
+        } catch (err) {
+          console.error('Local import failed', err);
+        } finally {
+          setUploading(false);
+        }
+      } else {
+        const formData = new FormData();
+        finalItems.forEach(item => {
+          if (item.file) {
+            const renamedFile = new File([item.file], item.destName, { type: item.file.type });
+            formData.append('files', renamedFile);
+          }
+        });
+
+        try {
+          await fetch(`/api/files/upload/${connectionId}`, {
+            method: 'POST',
+            body: formData
+          });
+          fetchLocalFiles();
+        } catch (err) {
+          console.error('Browser upload failed', err);
+        } finally {
+          setUploading(false);
+        }
+      }
+
+    } else {
+      setUploading(true);
+
+      const internalDragFromLocal = finalItems.some(i => !i.file && !i.path.includes('\\') && !i.path.includes('/'));
+
+      if (internalDragFromLocal) {
+        try {
+          for (const item of finalItems) {
+            await fetch('/api/sync/upload-file', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                id: connectionId,
+                filename: item.name,
+                remoteName: item.destName !== item.name ? item.destName : undefined
+              })
+            });
+          }
+          setTimeout(() => fetchRemoteFiles(currentRemotePath), 1000);
+        } catch (err) {
+          console.error('Local-to-remote drop failed', err);
+        } finally {
+          setUploading(false);
+        }
+        return;
+      }
+
+      const hasPaths = finalItems.every(item => item.path && item.path !== item.name);
+
+      if (hasPaths) {
+        try {
+          const importRes = await fetch(`/api/files/import-local/${connectionId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              items: finalItems.map(i => ({ srcPath: i.path, destName: i.destName })),
+              remoteDir: currentRemotePath
+            })
+          });
+          const importData = await importRes.json();
+          
+          if (importData.success) {
+            await fetch('/api/sync/bulk', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                id: connectionId,
+                basePath: importData.relativePath,
+                items: finalItems.map(i => ({
+                  path: i.destName,
+                  localName: i.destName,
+                  direction: 'upload',
+                  isDirectory: i.isDirectory
+                }))
+              })
+            });
+
+            fetchLocalFiles();
+            setTimeout(() => fetchRemoteFiles(currentRemotePath), 1500);
+          }
+        } catch (err) {
+          console.error('Remote drop upload failed', err);
+        } finally {
+          setUploading(false);
+        }
+      } else {
+        const formData = new FormData();
+        finalItems.forEach(item => {
+          if (item.file) {
+            const renamedFile = new File([item.file], item.destName, { type: item.file.type });
+            formData.append('files', renamedFile);
+          }
+        });
+
+        try {
+          const getRelRes = await fetch(`/api/files/import-local/${connectionId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items: [], remoteDir: currentRemotePath })
+          });
+          const getRelData = await getRelRes.json();
+          const relativePath = getRelData.relativePath || '';
+
+          await fetch(`/api/files/upload/${connectionId}?subDir=${encodeURIComponent(relativePath)}`, {
+            method: 'POST',
+            body: formData
+          });
+
+          await fetch('/api/sync/bulk', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              id: connectionId,
+              basePath: relativePath,
+              items: finalItems.map(i => ({
+                path: i.destName,
+                localName: i.destName,
+                direction: 'upload',
+                isDirectory: i.isDirectory
+              }))
+            })
+          });
+
+          fetchLocalFiles();
+          setTimeout(() => fetchRemoteFiles(currentRemotePath), 1500);
+        } catch (err) {
+          console.error('Browser remote upload failed', err);
+        } finally {
+          setUploading(false);
+        }
+      }
+    }
+  };
 
   const fetchRemoteFiles = async (path?: string) => {
     setLoading(true);
@@ -137,25 +453,28 @@ const FileManager: React.FC<Props> = ({ connectionId, serverName, onClose }) => 
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-5xl h-[80vh] flex flex-col">
+    <div className="fixed inset-0 bg-neutral-950/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className="bg-neutral-900 border border-neutral-850 w-full max-w-5xl h-[80vh] flex flex-col rounded-none text-neutral-200 font-mono">
         {/* Header */}
-        <div className="flex justify-between items-center p-4 border-b border-gray-200">
+        <div className="flex justify-between items-center p-4 border-b border-neutral-800 bg-neutral-950">
           <div>
-            <h2 className="text-xl font-bold text-gray-800">File Manager</h2>
-            <p className="text-sm text-gray-500">Connection: {serverName}</p>
+            <h2 className="text-xs font-black text-neutral-100 uppercase tracking-widest flex items-center gap-2">
+              <span className="w-1.5 h-3.5 bg-orange-500 block animate-signal"></span>
+              File Explorer
+            </h2>
+            <p className="text-[10px] text-neutral-500 font-mono mt-1 uppercase">Node: {serverName}</p>
           </div>
           <div className="flex items-center space-x-2">
              <button 
                onClick={handleSyncNow}
                disabled={syncing}
-               className={`flex items-center px-3 py-1.5 bg-indigo-600 text-white text-sm font-medium rounded hover:bg-indigo-700 transition-colors ${syncing ? 'opacity-70 cursor-wait' : ''}`}
+               className={`flex items-center px-3 py-1.5 bg-neutral-950 hover:bg-neutral-850 border border-neutral-800 text-emerald-500 text-xs font-bold rounded-none uppercase transition-colors ${syncing ? 'opacity-70 cursor-wait' : ''}`}
              >
-               <Play size={14} className="mr-2" />
-               {syncing ? 'Syncing...' : 'Sync Now'}
+               <Play size={12} className="mr-2 fill-current" />
+               {syncing ? 'Sync_Active...' : 'Sync Now'}
              </button>
-             <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-full transition-colors">
-               <X size={24} className="text-gray-500" />
+             <button onClick={onClose} className="p-1 hover:bg-neutral-800 text-neutral-500 hover:text-neutral-300 transition-colors">
+               <X size={18} />
              </button>
           </div>
         </div>
@@ -164,70 +483,101 @@ const FileManager: React.FC<Props> = ({ connectionId, serverName, onClose }) => 
         <div className="flex-1 flex overflow-hidden">
           
           {/* FTP Remote Panel */}
-          <div className="flex-1 flex flex-col border-r border-gray-200">
-            <div className="p-3 bg-gray-50 border-b border-gray-200 flex justify-between items-center">
-              <h3 className="font-semibold text-gray-700 flex items-center">
-                <ServerIcon className="w-4 h-4 mr-2" /> Remote FTP
+          <div 
+            className={`flex-1 flex flex-col border-r border-neutral-800 transition-all duration-300 relative ${
+              dragOverRemote ? 'bg-orange-950/15 border-orange-500/30' : ''
+            }`}
+            onDragOver={(e) => {
+               e.preventDefault();
+               e.stopPropagation();
+               setDragOverRemote(true);
+            }}
+            onDragLeave={(e) => {
+               e.preventDefault();
+               e.stopPropagation();
+               setDragOverRemote(false);
+            }}
+            onDrop={(e) => handleDropToPanel(e, 'remote')}
+          >
+            {dragOverRemote && (
+              <div className="absolute inset-0 bg-orange-950/20 backdrop-blur-[2px] border-2 border-dashed border-orange-500/60 flex flex-col justify-center items-center z-20 pointer-events-none animate-pulse">
+                <CloudUpload className="text-orange-500 w-12 h-12 mb-3 stroke-[1.5]" />
+                <span className="text-orange-500 text-xs font-bold tracking-widest uppercase">DROP_TO_UPLOAD_TO_REMOTE</span>
+                <span className="text-[10px] text-orange-600 mt-1 uppercase font-mono">NODE: {currentRemotePath}</span>
+              </div>
+            )}
+            <div className="p-3 bg-neutral-950 border-b border-neutral-800 flex justify-between items-center">
+              <h3 className="font-bold text-[10px] uppercase tracking-wider text-neutral-300 flex items-center">
+                <ServerIcon className="w-3.5 h-3.5 mr-2" /> Remote FTP
               </h3>
-              <button onClick={() => fetchRemoteFiles(currentRemotePath)} className="p-1 hover:bg-gray-200 rounded">
-                <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
+              <button onClick={() => fetchRemoteFiles(currentRemotePath)} className="p-1 hover:bg-neutral-850 border border-neutral-800 text-neutral-450 hover:text-neutral-200 transition-colors rounded-none">
+                <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
               </button>
             </div>
             
             {/* Breadcrumb / Path */}
-            <div className="px-3 py-2 bg-white border-b border-gray-100 text-sm text-gray-600 flex items-center">
+            <div className="px-3 py-2 bg-neutral-900/60 border-b border-neutral-850 text-xs text-neutral-400 flex items-center">
               <button 
                 onClick={() => {
                    const parent = currentRemotePath.split('/').slice(0, -1).join('/') || '/';
                    fetchRemoteFiles(parent);
                 }}
                 disabled={currentRemotePath === '/' || loading}
-                className="mr-2 p-1 hover:bg-gray-100 rounded disabled:opacity-30"
+                className="mr-2 p-1 hover:bg-neutral-850 border border-neutral-800 text-neutral-400 disabled:opacity-30 rounded-none"
               >
-                <ArrowLeft size={14} />
+                <ArrowLeft size={12} />
               </button>
-              <span className="truncate font-mono">{currentRemotePath}</span>
+              <span className="truncate font-mono text-[11px] uppercase">// {currentRemotePath}</span>
             </div>
 
             {/* File List */}
-            <div className="flex-1 overflow-y-auto p-2">
+            <div className="flex-1 overflow-y-auto p-2 bg-neutral-950/10 custom-scrollbar">
               {loading ? (
-                <div className="flex justify-center items-center h-full text-gray-400">Loading...</div>
+                <div className="flex justify-center items-center h-full text-neutral-600 text-xs uppercase">LOADING_REMOTE_FILES...</div>
               ) : (
                 <ul className="space-y-1">
                   {remoteFiles.map((file, i) => (
                     <li key={i}>
                       <button
                         onClick={() => file.isDirectory && fetchRemoteFiles(file.path)}
-                        className={`w-full flex items-center p-2 rounded hover:bg-blue-50 text-left group ${!file.isDirectory ? 'cursor-default' : ''}`}
+                        draggable
+                        onDragStart={(e) => {
+                          e.dataTransfer.setData('application/json', JSON.stringify({
+                            source: 'remote',
+                            file
+                          }));
+                        }}
+                        className={`w-full flex items-center p-2 rounded-none hover:bg-neutral-850/40 text-left group border border-transparent hover:border-neutral-800 hover:cursor-grab active:cursor-grabbing transition-all ${
+                          !file.isDirectory ? 'cursor-default' : ''
+                        }`}
                       >
                         {file.isDirectory ? (
-                          <Folder size={18} className="text-yellow-500 mr-3 flex-shrink-0" />
+                          <Folder size={14} className="text-orange-500 mr-3 flex-shrink-0" />
                         ) : (
-                          <File size={18} className="text-gray-400 mr-3 flex-shrink-0" />
+                          <FileIcon size={14} className="text-neutral-600 mr-3 flex-shrink-0" />
                         )}
                         <div className="flex-1 min-w-0">
-                          <div className="truncate text-sm font-medium text-gray-700 group-hover:text-blue-700">
+                          <div className="truncate text-xs font-bold text-neutral-300 group-hover:text-orange-400 transition-colors uppercase">
                             {file.name}
                           </div>
-                          <div className="text-xs text-gray-400">
-                            {file.isDirectory ? '-' : formatSize(file.size)} • {new Date(file.modifiedAt).toLocaleDateString()}
+                          <div className="text-[10px] text-neutral-500 font-mono mt-0.5">
+                            {file.isDirectory ? 'DIRECTORY' : formatSize(file.size)} // {new Date(file.modifiedAt).toLocaleDateString()}
                           </div>
                         </div>
                         {!file.isDirectory && (
-                          <div 
+                          <button 
                             onClick={(e) => { e.stopPropagation(); handleManualDownload(file); }}
-                            className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-white rounded cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity"
+                            className="p-1 border border-neutral-800 bg-neutral-950 text-neutral-450 hover:text-orange-500 hover:bg-neutral-900 rounded-none opacity-0 group-hover:opacity-100 transition-all"
                             title="Download to Local"
                           >
-                            <Download size={16} />
-                          </div>
+                            <Download size={14} />
+                          </button>
                         )}
                       </button>
                     </li>
                   ))}
                   {remoteFiles.length === 0 && (
-                     <div className="text-center py-10 text-gray-400 text-sm">Folder is empty</div>
+                     <div className="text-center py-10 text-neutral-600 text-xs uppercase font-bold">DIRECTORY_EMPTY</div>
                   )}
                 </ul>
               )}
@@ -236,91 +586,86 @@ const FileManager: React.FC<Props> = ({ connectionId, serverName, onClose }) => 
 
           {/* Local Sync Panel */}
           <div 
-            className="flex-1 flex flex-col bg-gray-50/50"
+            className={`flex-1 flex flex-col bg-neutral-900/10 transition-all duration-300 relative ${
+              dragOverLocal ? 'bg-orange-950/15 border-orange-500/30' : ''
+            }`}
             onDragOver={(e) => {
                e.preventDefault();
                e.stopPropagation();
-               e.currentTarget.classList.add('bg-blue-50', 'border-2', 'border-blue-400', 'border-dashed');
+               setDragOverLocal(true);
             }}
             onDragLeave={(e) => {
                e.preventDefault();
                e.stopPropagation();
-               e.currentTarget.classList.remove('bg-blue-50', 'border-2', 'border-blue-400', 'border-dashed');
+               setDragOverLocal(false);
             }}
-            onDrop={async (e) => {
-               e.preventDefault();
-               e.stopPropagation();
-               e.currentTarget.classList.remove('bg-blue-50', 'border-2', 'border-blue-400', 'border-dashed');
-               
-               if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-                 setUploading(true);
-                 const formData = new FormData();
-                 Array.from(e.dataTransfer.files).forEach(file => {
-                   formData.append('files', file);
-                 });
-
-                 try {
-                   await fetch(`/api/files/upload/${connectionId}`, {
-                     method: 'POST',
-                     body: formData
-                   });
-                   fetchLocalFiles();
-                 } catch (err) {
-                   console.error('Drop upload failed', err);
-                 } finally {
-                   setUploading(false);
-                 }
-               }
-            }}
+            onDrop={(e) => handleDropToPanel(e, 'local')}
           >
-            <div className="p-3 bg-white border-b border-gray-200 flex justify-between items-center shadow-sm z-10">
-               <h3 className="font-semibold text-gray-700 flex items-center">
-                 <LaptopIcon className="w-4 h-4 mr-2" /> Local Sync Folder
+            {dragOverLocal && (
+              <div className="absolute inset-0 bg-orange-950/20 backdrop-blur-[2px] border-2 border-dashed border-orange-500/60 flex flex-col justify-center items-center z-20 pointer-events-none animate-pulse">
+                <CloudUpload className="text-orange-500 w-12 h-12 mb-3 stroke-[1.5]" />
+                <span className="text-orange-500 text-xs font-bold tracking-widest uppercase">DROP_TO_IMPORT_TO_LOCAL</span>
+                <span className="text-[10px] text-orange-600 mt-1 uppercase font-mono">DEST: LOCAL_SYNC_ROOT</span>
+              </div>
+            )}
+            <div className="p-3 bg-neutral-950 border-b border-neutral-800 flex justify-between items-center shadow-sm z-10">
+               <h3 className="font-bold text-[10px] uppercase tracking-wider text-neutral-300 flex items-center">
+                 <LaptopIcon className="w-3.5 h-3.5 mr-2" /> Local Sync Folder
                </h3>
                <div className="flex items-center">
-                  <button onClick={fetchLocalFiles} className="p-1 hover:bg-gray-100 rounded mr-2">
-                    <RefreshCw size={16} />
+                  <button onClick={fetchLocalFiles} className="p-1 hover:bg-neutral-850 border border-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors rounded-none mr-2">
+                    <RefreshCw size={12} />
                   </button>
-                  <label className={`flex items-center px-3 py-1.5 bg-blue-600 text-white text-sm font-medium rounded cursor-pointer hover:bg-blue-700 transition-colors ${uploading ? 'opacity-70 pointer-events-none' : ''}`}>
-                    <Upload size={14} className="mr-2" />
+                  <label className={`flex items-center px-3 py-1.5 bg-orange-600 hover:bg-orange-500 text-black border border-orange-700 text-xs font-bold rounded-none cursor-pointer uppercase transition-colors ${uploading ? 'opacity-70 pointer-events-none' : ''}`}>
+                    <Upload size={12} className="mr-1.5 stroke-[2.5]" />
                     {uploading ? 'Uploading...' : 'Upload Files'}
                     <input type="file" multiple className="hidden" onChange={handleUpload} />
                   </label>
                </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-2">
+            <div className="flex-1 overflow-y-auto p-2 custom-scrollbar bg-neutral-950/10">
                <ul className="space-y-1">
                   {localFiles.map((file, i) => (
-                    <li key={i} className="flex items-center p-2 rounded bg-white border border-gray-100 hover:border-blue-200 group">
-                        <File size={18} className="text-blue-400 mr-3 flex-shrink-0" />
+                    <li 
+                      key={i} 
+                      draggable
+                      onDragStart={(e) => {
+                        e.dataTransfer.setData('application/json', JSON.stringify({
+                          source: 'local',
+                          file
+                        }));
+                      }}
+                      className="flex items-center p-2 rounded-none bg-neutral-950/40 border border-neutral-850/80 hover:border-neutral-800 hover:cursor-grab active:cursor-grabbing group"
+                    >
+                        <FileIcon size={14} className="text-neutral-600 mr-3 flex-shrink-0" />
                         <div className="flex-1 min-w-0">
-                          <div className="truncate text-sm font-medium text-gray-700">
+                          <div className="truncate text-xs font-bold text-neutral-300 uppercase">
                             {file.name}
                           </div>
-                          <div className="text-xs text-gray-400">
-                            {formatSize(file.size)} • {new Date(file.modifiedAt).toLocaleDateString()}
+                          <div className="text-[10px] text-neutral-500 font-mono mt-0.5">
+                            {formatSize(file.size)} // {new Date(file.modifiedAt).toLocaleDateString()}
                           </div>
                         </div>
-                        <div className="flex items-center space-x-2">
+                        <div className="flex items-center space-x-2.5">
                            <button 
                               onClick={() => handleManualUpload(file)}
-                              className="p-1 text-gray-400 hover:text-blue-600 opacity-0 group-hover:opacity-100 transition-opacity"
+                              className="p-1 text-neutral-500 border border-neutral-800 bg-neutral-950 hover:text-orange-500 rounded-none hover:bg-neutral-900 opacity-0 group-hover:opacity-100 transition-all"
                               title="Upload to FTP"
                            >
-                              <CloudUpload size={16} />
+                              <CloudUpload size={14} />
                            </button>
-                           <div className="text-xs font-semibold text-green-600 bg-green-50 px-2 py-0.5 rounded">
+                           <div className="text-[9px] font-bold text-emerald-400 bg-emerald-950/20 border border-emerald-800/40 px-1.5 py-0.5 rounded-none uppercase">
                               Synced
                            </div>
                         </div>
                     </li>
                   ))}
                   {localFiles.length === 0 && (
-                     <div className="text-center py-12 text-gray-400">
-                        <Upload size={32} className="mx-auto mb-2 opacity-20" />
-                        <p className="text-sm">No files uploaded yet.</p>
-                        <p className="text-xs mt-1">Files uploaded here will auto-sync to FTP</p>
+                     <div className="text-center py-12 text-neutral-600">
+                        <Upload size={24} className="mx-auto mb-2 opacity-20 text-neutral-400" />
+                        <p className="text-xs uppercase font-bold tracking-wide">No local files detected</p>
+                        <p className="text-[10px] mt-1 text-neutral-600 uppercase font-mono">FILES PLACED IN LOCAL_SYNC WILL SYNC AUTOMATICALLY.</p>
                      </div>
                   )}
                </ul>
@@ -329,6 +674,17 @@ const FileManager: React.FC<Props> = ({ connectionId, serverName, onClose }) => 
 
         </div>
       </div>
+      
+      <ConflictResolverModal
+        isOpen={showConflictModal}
+        conflicts={conflicts}
+        onResolve={handleResolveConflicts}
+        onClose={() => {
+          setShowConflictModal(false);
+          setPendingDropItems([]);
+          setConflicts([]);
+        }}
+      />
     </div>
   );
 };

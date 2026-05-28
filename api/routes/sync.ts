@@ -36,6 +36,38 @@ router.get('/progress/:id', (req: Request, res: Response) => {
   res.json(progress || { activeUploads: [], queueLength: 0, totalFilesInBatch: 0, completedFiles: 0 });
 });
 
+router.get('/stream/:id', (req: Request, res: Response) => {
+  const connectionId = parseInt(req.params.id);
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no'
+  });
+
+  const initialProgress = syncManager.getProgress(connectionId);
+  res.write(`data: ${JSON.stringify(initialProgress || { activeUploads: [], queueLength: 0, totalFilesInBatch: 0, completedFiles: 0 })}\n\n`);
+
+  const onProgress = (id: number, data: any) => {
+    if (id === connectionId) {
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    }
+  };
+
+  syncManager.on('progress', onProgress);
+
+  const heartbeatTimer = setInterval(() => {
+    res.write(': keep-alive\n\n');
+  }, 15000);
+
+  req.on('close', () => {
+    clearInterval(heartbeatTimer);
+    syncManager.off('progress', onProgress);
+    res.end();
+  });
+});
+
 router.post('/upload-file', async (req: Request, res: Response) => {
   const { id, filename, remoteName } = req.body;
   try {
@@ -78,6 +110,36 @@ router.post('/bulk', async (req: Request, res: Response) => {
     // items: { path: string, direction: 'upload'|'download', isDirectory: boolean }[]
     await syncManager.processBulkSync(id, items, basePath || '/');
     res.json({ success: true, message: 'Bulk sync started' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.get('/interrupted', async (req: Request, res: Response) => {
+  try {
+    const sessions = await syncManager.getInterruptedSessions();
+    res.json({ success: true, sessions });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/resume-interrupted', async (req: Request, res: Response) => {
+  const { id } = req.body;
+  try {
+    // Start resume in background
+    syncManager.resumeInterruptedSync(parseInt(id));
+    res.json({ success: true, message: 'Recovery resume started' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/discard-interrupted', async (req: Request, res: Response) => {
+  const { id } = req.body;
+  try {
+    await syncManager.discardInterruptedSync(parseInt(id));
+    res.json({ success: true, message: 'Interrupted session discarded' });
   } catch (error: any) {
     res.status(500).json({ success: false, message: error.message });
   }

@@ -181,83 +181,87 @@ const ContentDiffModal: React.FC<Props> = ({
     };
 
     return (
-        <div className="fixed inset-0 bg-black bg-opacity-90 flex items-center justify-center z-[110] p-4 animate-in fade-in duration-200">
-            <div className="bg-white rounded-xl shadow-2xl w-full max-w-7xl h-[90vh] flex flex-col overflow-hidden">
+        <div className="fixed inset-0 bg-neutral-950/85 backdrop-blur-sm flex items-center justify-center z-[110] p-4 animate-in fade-in duration-200">
+            <div className="bg-neutral-900 border border-neutral-800 shadow-2xl w-full max-w-7xl h-[90vh] flex flex-col overflow-hidden rounded-none text-neutral-200 font-mono">
                 {/* Header */}
-                <div className="flex justify-between items-center p-4 border-b border-gray-200 bg-gray-50">
+                <div className="flex justify-between items-center p-4 border-b border-neutral-800 bg-neutral-950">
                     <div className="flex items-center">
-                        <span className="p-2 bg-blue-100 text-blue-600 rounded-lg mr-3">
+                        <span className="p-2 bg-neutral-900 border border-neutral-800 text-orange-500 rounded-none mr-3">
                             <Save size={20} />
                         </span>
                         <div>
-                            <h3 className="text-lg font-bold text-gray-800">{fileName}</h3>
-                            <p className="text-xs text-gray-500">Live Content Comparison</p>
+                            <h3 className="text-xs font-bold text-neutral-100 uppercase tracking-widest">{fileName}</h3>
+                            <p className="text-[10px] text-neutral-500 font-mono uppercase tracking-wider mt-0.5">[Live Content Comparison]</p>
                         </div>
                     </div>
                     <div className="flex items-center space-x-3">
-                        {loading && <span className="text-sm text-gray-400 flex items-center"><Loader2 size={14} className="animate-spin mr-2" /> Loading...</span>}
+                        {loading && (
+                            <span className="text-xs text-neutral-450 flex items-center uppercase font-bold">
+                                <Loader2 size={12} className="animate-spin mr-2 text-orange-500" /> Fetching...
+                            </span>
+                        )}
 
                         {!loading && !error && (
                             <>
                                 <button
                                     onClick={fetchContent}
-                                    className="p-2 text-gray-500 hover:text-blue-600 hover:bg-gray-100 rounded-lg transition-colors mr-2"
+                                    className="p-2 text-neutral-400 border border-neutral-800 bg-neutral-950 hover:text-orange-500 hover:bg-neutral-900 rounded-none transition-colors mr-2"
                                     title="Reload from Server (Discard Edits)"
                                 >
-                                    <RefreshCw size={18} />
+                                    <RefreshCw size={14} />
                                 </button>
 
                                 <button
                                     onClick={() => handleSync('download')}
                                     disabled={loading || isSyncing || remoteContent === null}
-                                    className="px-4 py-2 bg-purple-100 hover:bg-purple-200 text-purple-700 rounded-lg text-sm font-semibold flex items-center transition-colors disabled:opacity-50"
+                                    className="px-3 py-1.5 bg-neutral-950 hover:bg-neutral-900 border border-emerald-900/50 text-emerald-500 rounded-none text-xs font-bold flex items-center transition-colors disabled:opacity-50"
                                     title="Overwrite Local with Remote"
                                 >
-                                    {isSyncing ? <Loader2 size={16} className="animate-spin mr-2" /> : <ArrowLeft size={16} className="mr-2" />}
-                                    Pull to Local
+                                    {isSyncing ? <Loader2 size={12} className="animate-spin mr-2" /> : <ArrowLeft size={12} className="mr-2" />}
+                                    PULL_TO_LOCAL
                                 </button>
                                 <button
                                     onClick={() => handleSync('upload')}
                                     disabled={isSyncing || !localContent}
-                                    className="px-4 py-2 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded-lg text-sm font-semibold flex items-center transition-colors disabled:opacity-50"
+                                    className="px-3 py-1.5 bg-orange-600 hover:bg-orange-500 text-black border border-orange-700 rounded-none text-xs font-bold flex items-center transition-colors disabled:opacity-50"
                                     title="Overwrite Remote with Local"
                                 >
-                                    Push to Remote
-                                    {isSyncing ? <Loader2 size={16} className="animate-spin ml-2" /> : <ArrowRight size={16} className="ml-2" />}
+                                    PUSH_TO_REMOTE
+                                    {isSyncing ? <Loader2 size={12} className="animate-spin ml-2" /> : <ArrowRight size={12} className="ml-2" />}
                                 </button>
                             </>
                         )}
-                        <div className="h-6 w-px bg-gray-300 mx-2"></div>
-                        <button onClick={onClose} className="p-2 hover:bg-gray-200 rounded-full transition-colors text-gray-500">
-                            <X size={20} />
+                        <div className="h-6 w-px bg-neutral-800 mx-2"></div>
+                        <button onClick={onClose} className="p-1.5 hover:bg-neutral-850 border border-neutral-850 rounded-none transition-colors text-neutral-500 hover:text-red-500">
+                            <X size={16} />
                         </button>
                     </div>
                 </div>
 
                 {/* Diff Editor */}
                 <div className="flex-1 relative bg-[#1e1e1e]">
-                    <div className="absolute top-0 left-0 w-1/2 flex justify-between items-center px-4 py-1 bg-[#252526] border-b border-[#333] z-10">
-                        <span className="text-xs font-mono text-gray-400">LOCAL (Editable)</span>
+                    <div className="absolute top-0 left-0 w-1/2 flex justify-between items-center px-4 py-1.5 bg-neutral-950 border-b border-neutral-850 z-10 font-mono">
+                        <span className="text-[10px] font-bold text-neutral-500 uppercase tracking-wider">LOCAL (Editable)</span>
                         <button
                             onClick={() => handleSave('local')}
                             disabled={isSyncing || localContent === null}
-                            className="text-xs bg-blue-600 hover:bg-blue-700 text-white px-2 py-0.5 rounded flex items-center disabled:opacity-50"
+                            className="text-[9px] bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-emerald-400 px-2 py-0.5 rounded-none flex items-center disabled:opacity-50 uppercase font-bold tracking-wider"
                         >
-                            <Save size={10} className="mr-1" /> Save Local
+                            <Save size={10} className="mr-1 text-emerald-500" /> Save Local
                         </button>
                     </div>
-                    <div className="absolute top-0 right-0 w-1/2 flex justify-between items-center px-4 py-1 bg-[#252526] border-b border-[#333] z-10">
-                        <span className="text-xs font-mono text-gray-400">REMOTE (Editable)</span>
+                    <div className="absolute top-0 right-0 w-1/2 flex justify-between items-center px-4 py-1.5 bg-neutral-950 border-b border-neutral-850 z-10 font-mono">
+                        <span className="text-[10px] font-bold text-neutral-500 uppercase tracking-wider">REMOTE (Editable)</span>
                         <button
                             onClick={() => handleSave('remote')}
                             disabled={isSyncing || remoteContent === null}
-                            className="text-xs bg-purple-600 hover:bg-purple-700 text-white px-2 py-0.5 rounded flex items-center disabled:opacity-50"
+                            className="text-[9px] bg-orange-600 hover:bg-orange-500 text-black border border-orange-700 px-2 py-0.5 rounded-none flex items-center disabled:opacity-50 uppercase font-bold tracking-wider"
                         >
                             <Save size={10} className="mr-1" /> Save Remote
                         </button>
                     </div>
 
-                    <div className="pt-6 h-full">
+                    <div className="pt-8 h-full">
                         {!loading && !error ? (
                             <DiffEditor
                                 original={localContent || ''} // Left side (Original/Local)
@@ -269,29 +273,31 @@ const ContentDiffModal: React.FC<Props> = ({
                                     originalEditable: true,
                                     renderSideBySide: true,
                                     scrollBeyondLastLine: false,
-                                    minimap: { enabled: false }
+                                    minimap: { enabled: false },
+                                    fontFamily: 'ui-monospace, monospace',
+                                    fontSize: 12,
+                                    lineNumbersMinChars: 3
                                 }}
                                 onMount={(editor) => {
                                     editorRef.current = editor;
-                                    // Removed onDidChangeModelContent listeners to prevent state update -> re-render -> cursor jump
                                 }}
                             />
                         ) : (
-                            <div className="flex items-center justify-center h-full text-gray-400 flex-col">
+                            <div className="flex items-center justify-center h-full text-neutral-500 flex-col">
                                 {loading ? (
                                     <>
-                                        <Loader2 size={40} className="animate-spin mb-4 text-blue-500" />
-                                        <p>Fetching content...</p>
+                                        <Loader2 size={32} className="animate-spin mb-4 text-orange-500" />
+                                        <p className="text-xs uppercase font-bold tracking-widest text-neutral-400">Fetching remote files...</p>
                                     </>
                                 ) : (
-                                    <div className="text-red-400 text-center">
-                                        <p className="font-bold mb-2">Error loading content</p>
-                                        <p className="text-sm">{error}</p>
+                                    <div className="text-red-500 text-center max-w-md p-6 border border-neutral-800 bg-neutral-950 font-mono">
+                                        <p className="font-bold mb-2 uppercase text-xs tracking-wider">Error loading content</p>
+                                        <p className="text-xs text-neutral-450 mb-4">{error}</p>
                                         <button
                                             onClick={fetchContent}
-                                            className="mt-4 px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-white text-sm"
+                                            className="px-4 py-2 bg-neutral-900 border border-neutral-800 hover:bg-neutral-850 text-red-400 text-xs font-bold uppercase tracking-wider rounded-none"
                                         >
-                                            Retry
+                                            Retry Operation
                                         </button>
                                     </div>
                                 )}

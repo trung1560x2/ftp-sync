@@ -1,7 +1,7 @@
 
 import { Client, FileInfo } from 'basic-ftp';
 import { TransferClient, ConnectOptions, FileStats } from './TransferClient.js';
-import { Readable } from 'stream';
+import { Readable, Writable } from 'stream';
 import path from 'path';
 
 export class FtpClientAdapter implements TransferClient {
@@ -56,12 +56,12 @@ export class FtpClientAdapter implements TransferClient {
         }
     }
 
-    async uploadFrom(source: Readable | string, remotePath: string): Promise<void> {
-        await this.client.uploadFrom(source, remotePath);
+    async uploadFrom(source: Readable | string, remotePath: string, options?: { localStart?: number }): Promise<void> {
+        await this.client.uploadFrom(source, remotePath, options);
     }
 
-    async downloadTo(localPath: string, remotePath: string): Promise<void> {
-        await this.client.downloadTo(localPath, remotePath);
+    async downloadTo(destination: string | Writable, remotePath: string, startAt?: number): Promise<void> {
+        await this.client.downloadTo(destination, remotePath, startAt);
     }
 
     async ensureDir(remotePath: string): Promise<void> {
@@ -93,7 +93,12 @@ export class FtpClientAdapter implements TransferClient {
     async checkConnection(): Promise<boolean> {
         if (this.client.closed) return false;
         try {
-            await this.client.pwd();
+            // Race with a 2-second timeout to prevent dead/half-open sockets from hanging the main thread
+            const check = this.client.pwd();
+            const timeout = new Promise<never>((_, reject) => 
+                setTimeout(() => reject(new Error('Connection check timeout')), 2000)
+            );
+            await Promise.race([check, timeout]);
             return true;
         } catch {
             return false;

@@ -31,15 +31,15 @@ const ConfirmModal: React.FC<ConfirmModalProps> = ({
     const getIcon = () => {
         switch (type) {
             case 'success':
-                return <CheckCircle size={48} className="text-green-500" />;
+                return <CheckCircle size={32} className="text-emerald-500" />;
             case 'warning':
-                return <AlertTriangle size={48} className="text-yellow-500" />;
+                return <AlertTriangle size={32} className="text-orange-500" />;
             case 'error':
-                return <AlertCircle size={48} className="text-red-500" />;
+                return <AlertCircle size={32} className="text-red-500" />;
             case 'confirm':
-                return <AlertCircle size={48} className="text-blue-500" />;
+                return <AlertCircle size={32} className="text-orange-500" />;
             default:
-                return <Info size={48} className="text-blue-500" />;
+                return <Info size={32} className="text-neutral-450" />;
         }
     };
 
@@ -47,38 +47,38 @@ const ConfirmModal: React.FC<ConfirmModalProps> = ({
         switch (type) {
             case 'success':
                 return {
-                    bg: 'bg-green-50',
-                    border: 'border-green-200',
-                    button: 'bg-green-600 hover:bg-green-700',
-                    iconBg: 'bg-green-100'
+                    bg: 'bg-neutral-950/50',
+                    border: 'border-emerald-800/40',
+                    button: 'bg-neutral-950 border border-emerald-900/50 text-emerald-500 hover:bg-neutral-900 hover:text-emerald-400',
+                    iconBg: 'bg-neutral-950 border border-neutral-850'
                 };
             case 'warning':
                 return {
-                    bg: 'bg-yellow-50',
-                    border: 'border-yellow-200',
-                    button: 'bg-yellow-600 hover:bg-yellow-700',
-                    iconBg: 'bg-yellow-100'
+                    bg: 'bg-neutral-950/50',
+                    border: 'border-orange-900/40',
+                    button: 'bg-orange-600 hover:bg-orange-500 text-black border border-orange-700',
+                    iconBg: 'bg-neutral-950 border border-neutral-850'
                 };
             case 'error':
                 return {
-                    bg: 'bg-red-50',
-                    border: 'border-red-200',
-                    button: 'bg-red-600 hover:bg-red-700',
-                    iconBg: 'bg-red-100'
+                    bg: 'bg-neutral-950/50',
+                    border: 'border-red-900/40',
+                    button: 'bg-neutral-950 border border-red-900/50 text-red-500 hover:bg-neutral-900 hover:text-red-400',
+                    iconBg: 'bg-neutral-950 border border-neutral-850'
                 };
             case 'confirm':
                 return {
-                    bg: 'bg-blue-50',
-                    border: 'border-blue-200',
-                    button: 'bg-blue-600 hover:bg-blue-700',
-                    iconBg: 'bg-blue-100'
+                    bg: 'bg-neutral-950/50',
+                    border: 'border-orange-900/40',
+                    button: 'bg-orange-600 hover:bg-orange-500 text-black border border-orange-700',
+                    iconBg: 'bg-neutral-950 border border-neutral-850'
                 };
             default:
                 return {
-                    bg: 'bg-blue-50',
-                    border: 'border-blue-200',
-                    button: 'bg-blue-600 hover:bg-blue-700',
-                    iconBg: 'bg-blue-100'
+                    bg: 'bg-neutral-950/50',
+                    border: 'border-neutral-850',
+                    button: 'bg-neutral-950 border border-neutral-800 text-neutral-300 hover:bg-neutral-900',
+                    iconBg: 'bg-neutral-950 border border-neutral-850'
                 };
         }
     };
@@ -87,33 +87,33 @@ const ConfirmModal: React.FC<ConfirmModalProps> = ({
 
     const getDefaultTitle = () => {
         switch (type) {
-            case 'success': return 'Success';
-            case 'warning': return 'Warning';
-            case 'error': return 'Error';
-            case 'confirm': return 'Confirm Action';
-            default: return 'Information';
+            case 'success': return 'SUCCESS';
+            case 'warning': return 'WARNING';
+            case 'error': return 'ERROR';
+            case 'confirm': return 'CONFIRM_ACTION';
+            default: return 'INFO';
         }
     };
 
     return (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[100] animate-fadeIn">
+        <div className="fixed inset-0 bg-neutral-950/80 backdrop-blur-sm flex items-center justify-center z-[100] animate-fadeIn">
             <div
-                className={`bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden transform transition-all duration-300 animate-scaleIn ${colors.border} border`}
+                className={`bg-neutral-900 shadow-2xl w-full max-w-md mx-4 overflow-hidden transform transition-all duration-300 animate-scaleIn border rounded-none ${colors.border} font-mono text-neutral-200`}
                 onClick={(e) => e.stopPropagation()}
             >
                 {/* Header with Icon */}
-                <div className={`${colors.bg} p-6 flex flex-col items-center`}>
-                    <div className={`${colors.iconBg} p-4 rounded-full mb-4 shadow-lg`}>
+                <div className={`${colors.bg} p-6 flex flex-col items-center border-b border-neutral-850`}>
+                    <div className={`${colors.iconBg} p-3 mb-3 shadow-lg rounded-none`}>
                         {getIcon()}
                     </div>
-                    <h3 className="text-xl font-bold text-gray-800 text-center">
+                    <h3 className="text-xs font-bold uppercase tracking-widest text-neutral-100 text-center mt-2">
                         {title || getDefaultTitle()}
                     </h3>
                 </div>
 
                 {/* Content */}
                 <div className="p-6">
-                    <p className="text-gray-600 text-center text-base leading-relaxed">
+                    <p className="text-neutral-400 text-center text-xs leading-relaxed uppercase tracking-wider">
                         {message}
                     </p>
                 </div>
@@ -123,14 +123,14 @@ const ConfirmModal: React.FC<ConfirmModalProps> = ({
                     {showCancel && (
                         <button
                             onClick={onCancel}
-                            className="flex-1 px-6 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium rounded-xl transition-all duration-200 shadow-sm hover:shadow"
+                            className="flex-1 px-4 py-2 bg-neutral-950 border border-neutral-800 hover:bg-neutral-900 text-neutral-400 font-bold rounded-none text-xs transition-all duration-200 uppercase tracking-wider"
                         >
                             {cancelText}
                         </button>
                     )}
                     <button
                         onClick={onConfirm}
-                        className={`flex-1 px-6 py-3 ${colors.button} text-white font-medium rounded-xl transition-all duration-200 shadow-md hover:shadow-lg`}
+                        className={`flex-1 px-4 py-2 ${colors.button} font-bold rounded-none text-xs transition-all duration-200 uppercase tracking-wider`}
                     >
                         {confirmText}
                     </button>

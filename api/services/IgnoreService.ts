@@ -22,6 +22,12 @@ const DEFAULT_PATTERNS: string[] = [
  * The instance is cached and reloaded if the .ftpignore file changes.
  */
 export async function getIgnoreInstance(localRoot: string): Promise<Ignore> {
+    // Check cache first (watcher will clear cache if .ftpignore changes)
+    const cached = ignoreCache.get(localRoot);
+    if (cached) {
+        return cached.instance;
+    }
+
     const ftpignorePath = path.join(localRoot, FTPIGNORE_FILENAME);
 
     // Check if .ftpignore file exists
@@ -33,33 +39,11 @@ export async function getIgnoreInstance(localRoot: string): Promise<Ignore> {
         // File doesn't exist, use default patterns only
     }
 
-    // Check cache
-    const cached = ignoreCache.get(localRoot);
-    if (cached && cached.mtime === currentMtime) {
-        return cached.instance;
-    }
-
     // Create new instance
     const ig = ignore();
 
-    // Add default patterns
-    // Add default patterns ONLY if no file exists (to bootstrap).
-    // If file exists, we rely fully on it (and it should contain defaults if created from template).
-    // BUT for backward compatibility, we should probably keep adding them OR 
-    // rely on the fact that we just updated the template.
-
-    // DECISION: To allow user to "un-ignore" defaults, we must NOT add them hardcoded if file exists.
-    // However, if file exists but is old (doesn't have defaults), this might be a breaking change (suddenly syncing node_modules).
-    // SAFE APPROACH: Add them but allow negation? 
-    // "bạn vui lòng cho nó hiện lên giúp" implies they want to *see* and *control* them.
-    // Optimal: Don't add here. Rely on file.
-    // BUT what if file doesn't exist? currentMtime === 0.
-
     if (currentMtime === 0) {
         ig.add(DEFAULT_PATTERNS);
-    } else {
-        // File exists, we read it below.
-        // Note: If user has an empty file, they lose defaults. This is standard gitignore behavior.
     }
 
     // Load .ftpignore if exists

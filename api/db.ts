@@ -37,6 +37,10 @@ export const initDb = async () => {
       sync_mode TEXT DEFAULT 'bi_directional',
       secure INTEGER DEFAULT 0,
       sync_deletions INTEGER DEFAULT 0,
+      ssh_port INTEGER,
+      ssh_username TEXT,
+      ssh_password_hash TEXT,
+      ssh_private_key TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
@@ -58,9 +62,45 @@ export const initDb = async () => {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS local_file_cache (
+      connection_id INTEGER NOT NULL,
+      rel_path TEXT NOT NULL,
+      name TEXT NOT NULL,
+      is_directory INTEGER NOT NULL,
+      size INTEGER DEFAULT 0,
+      modified_at TEXT NOT NULL,
+      PRIMARY KEY (connection_id, rel_path)
+    );
+
+    CREATE TABLE IF NOT EXISTS sync_transfer_queue (
+      connection_id INTEGER NOT NULL,
+      file_path TEXT NOT NULL,
+      direction TEXT NOT NULL,
+      total_size INTEGER DEFAULT 0,
+      bytes_transferred INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'pending',
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (connection_id, file_path)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_sync_logs_conn ON sync_logs(connection_id);
     CREATE INDEX IF NOT EXISTS idx_transfer_stats_conn ON transfer_stats(connection_id);
+    CREATE INDEX IF NOT EXISTS idx_local_file_cache_conn ON local_file_cache(connection_id);
+    CREATE INDEX IF NOT EXISTS idx_sync_transfer_queue_conn ON sync_transfer_queue(connection_id);
+    CREATE INDEX IF NOT EXISTS idx_sync_transfer_queue_status ON sync_transfer_queue(status);
   `);
+
+  // Recovery: Mark all 'syncing' or 'pending' files from previous crash as 'interrupted'
+  try {
+    await db.exec(`
+      UPDATE sync_transfer_queue 
+      SET status = 'interrupted' 
+      WHERE status = 'syncing' OR status = 'pending'
+    `);
+    console.log('Startup crash check: Interrupted any pending/syncing transfers');
+  } catch (err) {
+    console.error('Failed to update crashed sync states:', err);
+  }
 
   // Migration for existing tables
   try {
@@ -105,6 +145,46 @@ export const initDb = async () => {
 
   try {
     await db.exec("ALTER TABLE ftp_connections ADD COLUMN exclude_paths TEXT");
+  } catch (e) { /* ignore if exists */ }
+
+  try {
+    await db.exec("ALTER TABLE ftp_connections ADD COLUMN last_sync_time INTEGER");
+  } catch (e) { /* ignore if exists */ }
+
+  try {
+    await db.exec("ALTER TABLE ftp_connections ADD COLUMN last_sync_duration INTEGER");
+  } catch (e) { /* ignore if exists */ }
+
+  try {
+    await db.exec("ALTER TABLE ftp_connections ADD COLUMN last_sync_status TEXT");
+  } catch (e) { /* ignore if exists */ }
+
+  try {
+    await db.exec("ALTER TABLE ftp_connections ADD COLUMN validation_status TEXT DEFAULT 'unverified'");
+  } catch (e) { /* ignore if exists */ }
+
+  try {
+    await db.exec("ALTER TABLE ftp_connections ADD COLUMN validation_message TEXT");
+  } catch (e) { /* ignore if exists */ }
+
+  try {
+    await db.exec("ALTER TABLE ftp_connections ADD COLUMN ssh_port INTEGER");
+  } catch (e) { /* ignore if exists */ }
+
+  try {
+    await db.exec("ALTER TABLE ftp_connections ADD COLUMN ssh_username TEXT");
+  } catch (e) { /* ignore if exists */ }
+
+  try {
+    await db.exec("ALTER TABLE ftp_connections ADD COLUMN ssh_password_hash TEXT");
+  } catch (e) { /* ignore if exists */ }
+
+  try {
+    await db.exec("ALTER TABLE ftp_connections ADD COLUMN ssh_private_key TEXT");
+  } catch (e) { /* ignore if exists */ }
+
+  try {
+    await db.exec("ALTER TABLE ftp_connections ADD COLUMN backup_path TEXT");
   } catch (e) { /* ignore if exists */ }
 
   console.log('Database initialized successfully');
