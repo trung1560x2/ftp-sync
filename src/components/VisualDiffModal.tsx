@@ -114,9 +114,10 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose, i
             } else {
                 setCopilotError(data.message || 'FAILED TO GENERATE EXPLANATION.');
             }
-        } catch (err: any) {
+        } catch (err: unknown) {
             console.error('AI explanation failed', err);
-            setCopilotError(err.message || 'LỖI KẾT NỐI VỚI MÁY CHỦ.');
+            const error = err as any;
+            setCopilotError(error.message || 'LỖI KẾT NỐI VỚI MÁY CHỦ.');
         } finally {
             setCopilotLoading(false);
         }
@@ -170,14 +171,16 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose, i
             } else if (data.error) {
                 throw new Error(data.error);
             }
-        } catch (err: any) {
+        } catch (err: unknown) {
             console.error('Failed to fetch diff', err);
-            setFetchError(err.message || 'Unknown error occurred');
+            const error = err as any;
+            setFetchError(error.message || 'Unknown error occurred');
         } finally {
             setLoading(false);
         }
     };
 
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     useEffect(() => {
         fetchDiff(currentPath || undefined);
     }, [connectionId, recursive, currentPath]); // Refetch when recursive toggles or path changes
@@ -393,6 +396,7 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose, i
                 setOverallProgress(null);
             }
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [progressData, processing, isSyncing]);
 
     // Auto-expand logs when sync is active (either local bulk processing or background sync)
