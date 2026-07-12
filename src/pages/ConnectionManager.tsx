@@ -6,35 +6,20 @@ import BackupModal from '../components/BackupModal';
 import { Plus, RefreshCw, Shield } from 'lucide-react';
 import { useConfirmModal } from '../components/ConfirmModal';
 import InterruptedSyncBanner from '../components/InterruptedSyncBanner';
+import { useConnectionsStore } from '../stores/connectionsStore';
 
 const ConnectionManager: React.FC = () => {
-  const [connections, setConnections] = useState<FTPConnection[]>([]);
+  const { connections, loading, fetchConnections, deleteConnection } = useConnectionsStore();
   const [showForm, setShowForm] = useState(false);
   const [showBackup, setShowBackup] = useState(false);
   const [editingConnection, setEditingConnection] = useState<FTPConnection | undefined>(undefined);
-  const [loading, setLoading] = useState(true);
 
   const [searchQuery, setSearchQuery] = useState('');
   const { showConfirm, ConfirmModalComponent } = useConfirmModal();
 
-  const fetchConnections = async () => {
-    setLoading(true);
-    try {
-      const response = await fetch('/api/ftp-connections');
-      if (response.ok) {
-        const data = await response.json();
-        setConnections(data);
-      }
-    } catch (error) {
-      console.error('Failed to fetch connections', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
     fetchConnections();
-  }, []);
+  }, [fetchConnections]);
 
   const handleCreate = () => {
     setEditingConnection(undefined);
@@ -56,12 +41,7 @@ const ConnectionManager: React.FC = () => {
     });
     if (!confirmed) return;
 
-    try {
-      await fetch(`/api/ftp-connections/${id}`, { method: 'DELETE' });
-      fetchConnections();
-    } catch (error) {
-      console.error('Failed to delete connection', error);
-    }
+    await deleteConnection(id);
   };
 
   const handleFormSuccess = () => {
@@ -70,7 +50,7 @@ const ConnectionManager: React.FC = () => {
   };
 
   const filteredConnections = React.useMemo(() => {
-    return connections.filter(conn =>
+    return (connections as FTPConnection[]).filter(conn =>
       (conn.name && conn.name.toLowerCase().includes(searchQuery.toLowerCase())) ||
       conn.server.toLowerCase().includes(searchQuery.toLowerCase()) ||
       conn.username.toLowerCase().includes(searchQuery.toLowerCase())

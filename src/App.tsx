@@ -5,6 +5,7 @@ import TerminalView from './components/terminal/TerminalView';
 import OverviewDashboard from './pages/OverviewDashboard';
 import { Terminal, Server, LayoutDashboard, Lock, Unlock, Eye, EyeOff, ShieldAlert, Key, Check, Loader2, LogOut } from 'lucide-react';
 import packageJson from '../package.json';
+import { useAuthStore } from './stores/authStore';
 
 function AppContent() {
   const location = useLocation();
@@ -63,12 +64,7 @@ function AppContent() {
               <span>STATUS: ACTIVE</span>
             </div>
             <button
-              onClick={() => {
-                fetch('/api/auth/logout', { method: 'POST' }).finally(() => {
-                  localStorage.removeItem('master_token');
-                  window.dispatchEvent(new Event('unauthorized'));
-                });
-              }}
+              onClick={() => useAuthStore.getState().logout()}
               className="flex items-center gap-1.5 px-3 py-1.5 text-neutral-400 hover:text-red-400 bg-neutral-800/40 hover:bg-red-500/10 border border-neutral-700/30 hover:border-red-500/20 rounded-lg transition-all duration-200 cursor-pointer text-[10px] font-semibold tracking-wide"
             >
               <LogOut size={11} />
@@ -99,54 +95,28 @@ function AppContent() {
 }
 
 function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isOnboarded, setIsOnboarded] = useState(false);
-  const [checkingAuth, setCheckingAuth] = useState(true);
+  const {
+    isAuthenticated,
+    isOnboarded,
+    checkingAuth,
+    lockoutSec,
+    error,
+    loading,
+    checkAuth,
+    register,
+    login,
+    setLockoutSec,
+    setError
+  } = useAuthStore();
+
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [lockoutSec, setLockoutSec] = useState(0);
-
-  const checkAuth = async () => {
-    try {
-      const res = await fetch('/api/auth/status');
-      const data = await res.json();
-      
-      if (data.success) {
-        setIsOnboarded(data.onboarded);
-        
-        if (data.onboarded) {
-          const token = localStorage.getItem('master_token');
-          if (token) {
-            const verifyRes = await fetch('/api/auth/verify');
-            const verifyData = await verifyRes.json();
-            if (verifyData.success && verifyData.valid) {
-              setIsAuthenticated(true);
-            } else {
-              localStorage.removeItem('master_token');
-            }
-          }
-        }
-      }
-    } catch (e) {
-      console.error('Failed to verify authentication status', e);
-    } finally {
-      setCheckingAuth(false);
-    }
-  };
 
   useEffect(() => {
     checkAuth();
-
-    const handleUnauthorized = () => {
-      setIsAuthenticated(false);
-    };
-    window.addEventListener('unauthorized', handleUnauthorized);
-    return () => window.removeEventListener('unauthorized', handleUnauthorized);
-  }, []);
+  }, [checkAuth]);
 
   // Lockout timer countdown
   useEffect(() => {
@@ -154,12 +124,10 @@ function App() {
       const timer = setTimeout(() => setLockoutSec(lockoutSec - 1), 1000);
       return () => clearTimeout(timer);
     }
-  }, [lockoutSec]);
+  }, [lockoutSec, setLockoutSec]);
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError('');
-
     if (password.length < 8) {
       setError('Password must be at least 8 characters long');
       return;
@@ -168,61 +136,18 @@ function App() {
       setError('Passwords do not match');
       return;
     }
-
-    setLoading(true);
-    try {
-      const res = await fetch('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password })
-      });
-      const data = await res.json();
-      if (data.success && data.token) {
-        localStorage.setItem('master_token', data.token);
-        setIsAuthenticated(true);
-        setIsOnboarded(true);
-      } else {
-        setError(data.error || 'Failed to complete setup');
-      }
-    } catch (err) {
-      setError('Connection error. Server not reachable.');
-    } finally {
-      setLoading(false);
-    }
+    await register(password);
   };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError('');
-
     if (!password) {
       setError('Password is required');
       return;
     }
-
-    setLoading(true);
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password })
-      });
-      
-      const data = await res.json();
-      if (res.status === 429) {
-        setLockoutSec(30);
-        setError(data.error || 'Too many failed login attempts.');
-      } else if (data.success && data.token) {
-        localStorage.setItem('master_token', data.token);
-        setIsAuthenticated(true);
-        setPassword('');
-      } else {
-        setError(data.error || 'Authentication failed');
-      }
-    } catch (err) {
-      setError('Connection error. Server not reachable.');
-    } finally {
-      setLoading(false);
+    const success = await login(password);
+    if (success) {
+      setPassword('');
     }
   };
 

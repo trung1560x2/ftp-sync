@@ -12,6 +12,8 @@ import { SimpleMutex } from '../utils/SimpleMutex.js';
 import { EventEmitter } from 'events';
 import { execFile } from 'child_process';
 import util from 'util';
+import { ConnectionPool } from './transfer/ConnectionPool.js';
+import { ProgressTracker, OverallProgress, UploadProgress } from './transfer/ProgressTracker.js';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -23,46 +25,21 @@ interface SyncLog {
   message: string;
 }
 
-interface UploadProgress {
-  type: 'upload' | 'download';
-  filename: string;
-  totalBytes: number;
-  bytesTransferred: number;
-  percent: number;
-  speedMBps: number;
-  etaSeconds: number;
-  startTime: number;
-}
 
-interface OverallProgress {
-  activeUploads: UploadProgress[];
-  queueLength: number;
-  totalFilesInBatch: number;
-  completedFiles: number;
-  filesUploaded: number;
-  filesSkipped: number;
-  filesDeleted: number;
-  filesFailed: number;
-  uploadSpeedMBps: number;
-  downloadSpeedMBps: number;
-}
 
 class SyncSession {
   // Sync Queue with concurrency control
   private syncQueue: PQueue;
   private poolSize: number;
 
-  // Connection pool for reuse
-  private connectionPool: TransferClient[] = [];
-  private availableClients: TransferClient[] = [];
+  // Extracted Connection Pool and Progress Tracker
+  private connectionPool: ConnectionPool;
+  private progressTracker: ProgressTracker;
 
   // Main control connection (for listing, watching)
   private client: TransferClient;
   private isConnected = false;
   private mutex: SimpleMutex = new SimpleMutex();
-
-  // Upload progress tracking
-  private uploadProgress: Map<string, UploadProgress> = new Map(); // Key: taskId (UUID)
 
   // Delete queue (can be handled by p-queue too, but maybe separate for now?)
   // keeping delete queue simple for now, or move to p-queue?
@@ -73,9 +50,6 @@ class SyncSession {
   // but we must ensure it doesn't conflict with transfers.
   private deleteQueue: Set<string> = new Set();
   private isProcessingDeletes = false;
-
-  private totalFilesInBatch = 0;
-  private completedFilesInBatch = 0;
 
   // Cache for known existing remote directories to avoid redundant checks
   private remoteDirCache: Set<string> = new Set();
@@ -99,42 +73,36 @@ class SyncSession {
   private isSyncing = false;
   public isLocalCacheWarmed = false;
 
-  // Progress counters
-  private filesUploaded = 0;
-  private filesSkipped = 0;
-  private filesDeleted = 0;
-  private filesFailed = 0;
-  private batchStartTime = 0;
+  // Properties mapping for backwards compatibility with ProgressTracker
+  private get filesUploaded() { return this.progressTracker.filesUploaded; }
+  private set filesUploaded(v: number) { this.progressTracker.filesUploaded = v; }
 
-  // Sliding window for speed tracking
-  private uploadWindow: { time: number; bytes: number }[] = [];
-  private downloadWindow: { time: number; bytes: number }[] = [];
+  private get filesSkipped() { return this.progressTracker.filesSkipped; }
+  private set filesSkipped(v: number) { this.progressTracker.filesSkipped = v; }
+
+  private get filesDeleted() { return this.progressTracker.filesDeleted; }
+  private set filesDeleted(v: number) { this.progressTracker.filesDeleted = v; }
+
+  private get filesFailed() { return this.progressTracker.filesFailed; }
+  private set filesFailed(v: number) { this.progressTracker.filesFailed = v; }
+
+  private get totalFilesInBatch() { return this.progressTracker.totalFilesInBatch; }
+  private set totalFilesInBatch(v: number) { this.progressTracker.totalFilesInBatch = v; }
+
+  private get completedFilesInBatch() { return this.progressTracker.completedFilesInBatch; }
+  private set completedFilesInBatch(v: number) { this.progressTracker.completedFilesInBatch = v; }
+
+  private get batchStartTime() { return this.progressTracker.batchStartTime; }
+  private set batchStartTime(v: number) { this.progressTracker.batchStartTime = v; }
+
+  private get uploadProgress() { return this.progressTracker.getUploadProgress(); }
 
   private recordWindowBytes(bytes: number, type: 'upload' | 'download') {
-    const now = Date.now();
-    if (type === 'upload') {
-      this.uploadWindow.push({ time: now, bytes });
-    } else {
-      this.downloadWindow.push({ time: now, bytes });
-    }
-    this.cleanWindows(now);
+    this.progressTracker.recordWindowBytes(bytes, type);
   }
 
-  private cleanWindows(now: number) {
-    const threshold = now - 2000; // 2 seconds window
-    this.uploadWindow = this.uploadWindow.filter(p => p.time > threshold);
-    this.downloadWindow = this.downloadWindow.filter(p => p.time > threshold);
-  }
-
-  private getWindowSpeed(type: 'upload' | 'download'): number {
-    const now = Date.now();
-    this.cleanWindows(now);
-    const window = type === 'upload' ? this.uploadWindow : this.downloadWindow;
-    if (window.length === 0) return 0;
-    
-    const totalBytes = window.reduce((sum, p) => sum + p.bytes, 0);
-    const speedMBps = (totalBytes / (1024 * 1024)) / 2.0; // average over 2 seconds
-    return Math.round(speedMBps * 100) / 100;
+  private getWindowSpeed(type: 'upload' | 'download') {
+    return this.progressTracker.getWindowSpeed(type);
   }
 
   public onProgress?: (progress: OverallProgress) => void;
@@ -168,7 +136,8 @@ class SyncSession {
     // Initialize PQueue
     this.syncQueue = new PQueue({ concurrency: this.poolSize });
 
-    this.connectionPool = [];
+    this.connectionPool = new ConnectionPool(this.connectionId, this.config, this.poolSize, (type, msg) => this.log(type, msg));
+    this.progressTracker = new ProgressTracker();
 
     if (this.config.local_path && this.config.local_path.trim() !== '') {
       this.localRoot = this.config.local_path.replace(/^['"]|['"]$/g, '');
@@ -397,83 +366,16 @@ class SyncSession {
     }
   }
 
-  // Get a free client (or create new one)
   private async acquireClient(): Promise<TransferClient> {
-    // Check available pool clients - skip checkConnection for recently-used ones (< 30s idle)
-    while (this.availableClients.length > 0) {
-      const entry = this.availableClients.shift()! as any;
-      const client: TransferClient = entry.client || entry;
-      const lastUsed: number = entry.lastUsed || 0;
-      const idleSeconds = (Date.now() - lastUsed) / 1000;
-
-      // If used within last 30s, assume still alive (skip network ping)
-      if (idleSeconds < 30) {
-        if (!client.closed) return client;
-        // closed while in pool - discard and try next
-        try { client.close(); } catch { }
-        this.removeClient(client);
-        continue;
-      }
-
-      // Idle > 30s: do a quick check to verify still alive
-      try {
-        if (await client.checkConnection()) return client;
-      } catch { }
-
-      try { client.close(); } catch { }
-      this.removeClient(client);
-    }
-
-    // Need to create a new connection
-    if (this.connectionPool.length >= this.poolSize) {
-      // Pool full but all busy - wait a tiny bit and retry (should be rare)
-      await new Promise(r => setTimeout(r, 50));
-      return this.acquireClient();
-    }
-
-    const protocol = this.config.protocol || 'ftp';
-    const client = TransferClientFactory.createClient(protocol, 60000);
-
-    const password = decrypt(this.config.password_hash);
-    if (!password) throw new Error('Cannot decrypt password');
-
-    // Small jitter to avoid thundering herd
-    await new Promise(r => setTimeout(r, Math.random() * 100));
-
-    await client.connect({
-      host: this.config.server,
-      username: this.config.username,
-      password: password,
-      port: this.config.port || (this.config.protocol === 'sftp' ? 22 : 21),
-      secure: this.config.secure ? true : false,
-      secureOptions: this.config.secure ? {
-        rejectUnauthorized: false,
-        minVersion: 'TLSv1.2'
-      } : undefined,
-      privateKey: this.config.private_key
-    });
-
-    this.connectionPool.push(client);
-    return client;
+    return this.connectionPool.acquire();
   }
 
   private removeClient(client: TransferClient) {
-    const index = this.connectionPool.indexOf(client);
-    if (index !== -1) {
-      this.connectionPool.splice(index, 1);
-    }
-    // Also remove from available
-    this.availableClients = this.availableClients.filter((e: any) => {
-      const c = e.client || e;
-      return c !== client;
-    }) as any;
+    this.connectionPool.remove(client);
   }
 
   private releaseClient(client: TransferClient) {
-    if (client && !client.closed) {
-      // Store with timestamp so acquireClient can skip checkConnection for fresh clients
-      (this.availableClients as any).push({ client, lastUsed: Date.now() });
-    }
+    this.connectionPool.release(client);
   }
 
   // Add file to queue
@@ -1107,13 +1009,7 @@ class SyncSession {
     }
 
     // Close all pool clients
-    for (const client of this.connectionPool) {
-      try {
-        if (!client.closed) client.close();
-      } catch { }
-    }
-    this.connectionPool = [];
-    this.availableClients = [];
+    await this.connectionPool.destroyAll();
 
     this.log('info', 'Sync session stopped');
   }
@@ -1747,20 +1643,7 @@ class SyncSession {
 
   // Pre-warm the connection pool so all slots are ready before transfers start
   public async warmConnectionPool() {
-    const warmCount = Math.min(this.poolSize, 5); // Warm up to poolSize connections
-    this.log('info', `Pre-warming ${warmCount} connections...`);
-    const warmTasks = Array.from({ length: warmCount }, async (_, i) => {
-      try {
-        // Stagger slightly to avoid hitting server all at once
-        await new Promise(r => setTimeout(r, i * 80));
-        const client = await this.acquireClient();
-        this.releaseClient(client); // Return to pool immediately
-      } catch (e: any) {
-        this.log('error', `Pool warm-up failed for slot ${i}: ${e.message}`);
-      }
-    });
-    await Promise.all(warmTasks);
-    this.log('info', `Connection pool ready (${this.availableClients.length} connections)`);
+    await this.connectionPool.warm();
   }
 
   public async processBulkSync(items: { path: string, localName?: string | null, direction: 'upload' | 'download', isDirectory: boolean }[], basePath: string) {
