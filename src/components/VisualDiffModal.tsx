@@ -3,6 +3,11 @@ import { X, RefreshCw, ArrowLeft, Folder, File, ArrowRight, Upload, Download, Al
 import { FixedSizeList as List } from 'react-window';
 import ContentDiffModal from './ContentDiffModal';
 import { useSyncProgress } from '../hooks/useSyncProgress';
+import { DiffHeader } from './visual-diff/DiffHeader';
+import { DiffRow } from './visual-diff/DiffRow';
+import { CopilotPanel } from './visual-diff/CopilotPanel';
+import { LogsPanel } from './visual-diff/LogsPanel';
+import { useAiSettingsStore } from '../stores/aiSettingsStore';
 
 interface AutoSizerProps {
     renderProp: (props: { height: number | undefined; width: number | undefined }) => React.ReactNode;
@@ -60,20 +65,13 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose, i
     const [showLogs, setShowLogs] = useState(false);
     const [showCopilot, setShowCopilot] = useState(false);
     const [showCopilotSettings, setShowCopilotSettings] = useState(false);
-    const [copilotEnabled, setCopilotEnabled] = useState<boolean>(() => {
-        const stored = localStorage.getItem('gemini_copilot_enabled');
-        return stored !== 'false'; // default to true
-    });
-    const [copilotAutoAnalyze, setCopilotAutoAnalyze] = useState<boolean>(() => {
-        const stored = localStorage.getItem('gemini_copilot_auto_analyze');
-        return stored !== 'false'; // default to true
-    });
-    const [customApiKey, setCustomApiKey] = useState<string>(() => {
-        return localStorage.getItem('gemini_custom_api_key') || '';
-    });
-    const [selectedModel, setSelectedModel] = useState<string>(() => {
-        return localStorage.getItem('gemini_copilot_model') || 'gemini-1.5-flash';
-    });
+    const {
+        enabled: copilotEnabled,
+        setEnabled: setCopilotEnabled,
+        autoAnalyze: copilotAutoAnalyze,
+        apiKey: customApiKey,
+        model: selectedModel
+    } = useAiSettingsStore();
     const [copilotLoading, setCopilotLoading] = useState(false);
     const [copilotExplanation, setCopilotExplanation] = useState('');
     const [copilotError, setCopilotError] = useState('');
@@ -549,150 +547,50 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose, i
             <div className="fixed inset-0 bg-[#0d0e12]/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
                 <div className="bg-[#161922]/95 backdrop-blur-md border border-neutral-800/80 w-full max-w-6xl h-[85vh] flex flex-col relative rounded-2xl text-neutral-200 font-sans shadow-2xl overflow-hidden">
                     {/* Header */}
-                    <div className="flex justify-between items-center p-4 border-b border-neutral-800/60 bg-[#0d0e12]/60 shrink-0">
-                        <div className="flex items-center gap-4 flex-1">
-                            <div className="flex items-center">
-                                <span className="p-2 bg-neutral-900 border border-neutral-800 text-orange-500 rounded-lg mr-3">
-                                    <RefreshCw size={18} className={loading ? 'animate-spin' : ''} />
-                                </span>
-                                <div>
-                                    <h3 className="text-sm font-bold font-outfit text-white uppercase tracking-wider flex items-center gap-2">
-                                        Visual Diff
-                                        <span className="text-[10px] font-bold font-mono px-2 py-0.5 bg-neutral-900 border border-neutral-800 text-neutral-400 rounded-md uppercase">{serverName}</span>
-                                        {isSyncing && (
-                                            <span className="text-[9px] font-mono px-2 py-0.5 bg-emerald-950/20 text-emerald-400 border border-emerald-800/40 rounded-md font-bold uppercase tracking-wider flex items-center">
-                                                <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full mr-1.5 animate-pulse"></span>
-                                                Sync Active
-                                            </span>
-                                        )}
-                                    </h3>
-                                    <p className="text-[10px] text-neutral-500 font-mono uppercase tracking-wider mt-0.5">[Compare local and remote filesystem difference]</p>
-                                </div>
-                            </div>
+                    <DiffHeader
+                        loading={loading}
+                        serverName={serverName}
+                        isSyncing={!!isSyncing}
+                        searchQuery={searchQuery}
+                        setSearchQuery={setSearchQuery}
+                        selectedItemsSize={selectedItems.size}
+                        handleBulkSync={handleBulkSync}
+                        pendingCount={pendingCount}
+                        handleSendQueue={() => {
+                            if (batchTimerRef.current) {
+                                clearTimeout(batchTimerRef.current);
+                                batchTimerRef.current = null;
+                            }
                             
-                            <div className="relative w-64 flex-shrink-0">
-                                <Search size={14} className="absolute left-3 top-1/2 transform -translate-y-1/2 text-neutral-500" />
-                                <input
-                                    type="text"
-                                    placeholder="FILTER FILES..."
-                                    value={searchQuery}
-                                    onChange={(e) => setSearchQuery(e.target.value)}
-                                    className="w-full pl-9 pr-8 py-1.5 bg-[#0d0e12]/40 border border-neutral-800/80 focus:border-orange-500 focus:ring-1 focus:ring-orange-500/20 rounded-lg text-xs text-neutral-200 placeholder-neutral-600 outline-none uppercase font-mono transition-all"
-                                />
-                                {searchQuery && (
-                                    <button
-                                        onClick={() => setSearchQuery('')}
-                                        className="absolute right-2.5 top-1/2 transform -translate-y-1/2 text-neutral-500 hover:text-neutral-300 transition-colors"
-                                    >
-                                        <X size={12} />
-                                    </button>
-                                )}
-                            </div>
+                            const itemsToSync = [...pendingItemsRef.current];
+                            pendingItemsRef.current = [];
+                            setPendingCount(0);
 
-                            {selectedItems.size > 0 && (
-                                <div className="flex items-center gap-2 animate-fadeIn">
-                                    <button
-                                        onClick={() => handleBulkSync('upload')}
-                                        className="bg-orange-600 hover:bg-orange-500 text-black border border-orange-700 px-3 py-1.5 rounded-lg text-xs font-bold transition-all duration-150 uppercase tracking-wider flex items-center shadow-md shadow-orange-950/20"
-                                    >
-                                        <Upload size={12} className="mr-1.5 stroke-[2.5]" />
-                                        Upload ({selectedItems.size})
-                                    </button>
-                                    <button
-                                        onClick={() => handleBulkSync('download')}
-                                        className="bg-[#0d0e12]/60 hover:bg-[#0d0e12] border border-emerald-900/40 hover:border-emerald-800 text-emerald-400 px-3 py-1.5 rounded-lg text-xs font-bold transition-all duration-150 uppercase tracking-wider flex items-center shadow-md"
-                                    >
-                                        <Download size={12} className="mr-1.5 stroke-[2.5]" />
-                                        Download ({selectedItems.size})
-                                    </button>
-                                </div>
-                            )}
-
-                            {pendingCount > 0 && (
-                                <button
-                                    onClick={() => {
-                                        if (batchTimerRef.current) {
-                                            clearTimeout(batchTimerRef.current);
-                                            batchTimerRef.current = null;
-                                        }
-                                        
-                                        const itemsToSync = [...pendingItemsRef.current];
-                                        pendingItemsRef.current = [];
-                                        setPendingCount(0);
-
-                                        if (itemsToSync.length > 0) {
-                                            fetch('/api/sync/bulk', {
-                                                method: 'POST',
-                                                headers: { 'Content-Type': 'application/json' },
-                                                body: JSON.stringify({
-                                                    id: connectionId,
-                                                    items: itemsToSync,
-                                                    basePath: currentPath
-                                                })
-                                            }).catch(err => {
-                                                console.error('Sync action failed', err);
-                                                setProcessing(null);
-                                            });
-                                        }
-                                    }}
-                                    className="bg-amber-600 hover:bg-amber-500 text-black border border-amber-700 px-3 py-1.5 rounded-lg text-xs font-bold transition-all duration-150 uppercase tracking-wider flex items-center animate-pulse"
-                                >
-                                    <Upload size={12} className="mr-1.5" />
-                                    Send Queue ({pendingCount})
-                                </button>
-                            )}
-                        </div>
-
-                        <div className="flex items-center gap-2 ml-4">
-                            <label className="flex items-center gap-2 text-[10px] font-bold text-neutral-400 cursor-pointer bg-[#0d0e12]/40 px-3 py-1.5 rounded-lg border border-neutral-800 hover:bg-[#0d0e12]/80 hover:text-neutral-250 transition-all uppercase select-none">
-                                <input
-                                    type="checkbox"
-                                    checked={recursive}
-                                    onChange={(e) => setRecursive(e.target.checked)}
-                                    className="rounded bg-[#0d0e12]/60 border-neutral-800 text-orange-500 focus:ring-0 cursor-pointer"
-                                />
-                                Deep Scan
-                            </label>
-                            <button
-                                onClick={handleToggleCopilot}
-                                className={`flex items-center gap-1.5 px-3 py-1.5 border rounded-lg text-xs font-bold transition-all duration-150 uppercase tracking-wider select-none ${
-                                    showCopilot 
-                                        ? 'bg-emerald-500 text-black border-emerald-600 shadow-lg shadow-emerald-500/20' 
-                                        : 'bg-[#0d0e12]/40 text-neutral-400 border-neutral-800 hover:bg-[#0d0e12]/80 hover:text-emerald-400'
-                                }`}
-                                title="AI Explains Changes"
-                            >
-                                <Sparkles size={13} className={copilotLoading ? 'animate-spin' : ''} />
-                                AI Copilot
-                            </button>
-                            <button
-                                onClick={handleToggleLogs}
-                                className={`flex items-center gap-1.5 px-3 py-1.5 border rounded-lg text-xs font-bold transition-all duration-150 uppercase tracking-wider select-none ${
-                                    showLogs 
-                                        ? 'bg-orange-600 text-black border-orange-700 shadow-lg shadow-orange-600/20' 
-                                        : 'bg-[#0d0e12]/40 text-neutral-400 border-neutral-800 hover:bg-[#0d0e12]/80 hover:text-neutral-200'
-                                }`}
-                                title="Toggle Activity Log"
-                            >
-                                <Terminal size={13} />
-                                Logs
-                            </button>
-                            <button
-                                onClick={() => fetchDiff(currentPath)}
-                                disabled={loading}
-                                className="p-1.5 hover:bg-neutral-800 border border-neutral-800 text-neutral-400 hover:text-neutral-250 transition-colors rounded-lg disabled:opacity-50"
-                                title="Refresh"
-                            >
-                                <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-                            </button>
-                            <button
-                                onClick={onClose}
-                                className="p-1.5 hover:bg-neutral-800 border border-neutral-800 text-neutral-400 hover:text-red-400 transition-colors rounded-lg"
-                            >
-                                <X size={14} />
-                            </button>
-                        </div>
-                    </div>
+                            if (itemsToSync.length > 0) {
+                                fetch('/api/sync/bulk', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        id: connectionId,
+                                        items: itemsToSync,
+                                        basePath: currentPath
+                                    })
+                                }).catch(err => {
+                                    console.error('Sync action failed', err);
+                                    setProcessing(null);
+                                });
+                            }
+                        }}
+                        recursive={recursive}
+                        setRecursive={setRecursive}
+                        showCopilot={showCopilot}
+                        handleToggleCopilot={handleToggleCopilot}
+                        showLogs={showLogs}
+                        handleToggleLogs={handleToggleLogs}
+                        copilotLoading={copilotLoading}
+                        fetchDiff={() => fetchDiff(currentPath)}
+                        onClose={onClose}
+                    />
 
                     {/* Toolbar / Breadcrumb */}
                     <div className="px-4 py-3 bg-[#0d0e12]/40 border-b border-neutral-800/60 flex items-center shadow-sm z-10 shrink-0">
@@ -805,146 +703,21 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose, i
                                             {({ index, style }) => {
                                                 const item = filteredItems[index];
                                                 return (
-                                                    <div style={style} className={`grid grid-cols-12 gap-0 hover:bg-[#161922]/50 hover:border-neutral-800/40 border-b border-neutral-800/30 transition-all duration-150 group ${item.isDirectory ? 'bg-[#161922]/10' : ''}`}>
-
-                                                        {/* Local Side */}
-                                                        <div className="col-span-4 p-3 flex items-center border-r border-neutral-800/40 overflow-hidden">
-                                                            <input
-                                                                type="checkbox"
-                                                                className="mr-3 rounded border-neutral-800 bg-[#0d0e12]/40 text-orange-500 focus:ring-0 h-4 w-4 cursor-pointer"
-                                                                checked={selectedItems.has(item.name)}
-                                                                onChange={() => toggleSelection(item.name)}
-                                                                onClick={(e) => e.stopPropagation()}
-                                                            />
-                                                            <div className="flex items-center min-w-0 flex-1">
-                                                                {item.isDirectory ? (
-                                                                    <div className="relative mr-3 flex-shrink-0">
-                                                                        <Folder size={14} className="text-amber-500" />
-                                                                        {item.containsChanges && (
-                                                                            <span className="absolute -top-1 -right-1 w-2 h-2 bg-orange-500 rounded-full border border-[#161922]"></span>
-                                                                        )}
-                                                                    </div>
-                                                                ) : (
-                                                                    <File size={14} className={`mr-3 flex-shrink-0 ${!item.local ? 'text-neutral-700' : 'text-neutral-400'}`} />
-                                                                )}
-                                                                <div className="truncate min-w-0 flex-1">
-                                                                    <div className={`truncate text-xs ${!item.local ? 'text-neutral-600 italic' : 'text-neutral-200 font-semibold group-hover:text-orange-400 transition-colors uppercase'}`}>
-                                                                        {item.name}
-                                                                    </div>
-                                                                    {item.local && !item.isDirectory && (
-                                                                        <div className="text-[9px] text-neutral-500 font-mono mt-0.5 uppercase">
-                                                                            {formatSize(item.local.size)} • {new Date(item.local.modifiedAt).toLocaleDateString()}
-                                                                        </div>
-                                                                    )}
-                                                                </div>
-                                                            </div>
-                                                        </div>
-
-                                                        {/* Center Status */}
-                                                        <div className="col-span-4 p-2 flex flex-col justify-center items-center border-r border-neutral-800/40 bg-[#0d0e12]/10">
-                                                            <span className={`text-[9px] font-bold px-2.5 py-0.5 rounded-full mb-1 flex items-center ${getStatusColor(item.status)}`}>
-                                                                {getStatusIcon(item)}
-                                                                {item.containsChanges && <span className="ml-1 text-orange-500 font-extrabold uppercase">[Sub Modified]</span>}
-                                                            </span>
-
-                                                            {/* Action Buttons */}
-                                                            <div className="flex space-x-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all duration-150">
-                                                                {!item.isDirectory && (
-                                                                    <>
-                                                                        {item.remote && (
-                                                                            <button
-                                                                                onClick={(e) => {
-                                                                                    e.stopPropagation();
-                                                                                    const remotePath = currentPath === '/' ? `/${item.name}` : `${currentPath}/${item.name}`;
-                                                                                    setContentDiffFile({ remotePath, fileName: item.name });
-                                                                                }}
-                                                                                disabled={!!processing}
-                                                                                title="Compare Content"
-                                                                                className="p-1.5 rounded-lg border border-neutral-800 bg-[#0d0e12]/60 text-neutral-400 hover:text-orange-400 hover:bg-neutral-900 transition-colors"
-                                                                            >
-                                                                                <Eye size={12} />
-                                                                            </button>
-                                                                        )}
-
-                                                                        {item.status !== 'synchronized' && (
-                                                                            <>
-                                                                                <button
-                                                                                    onClick={(e) => { e.stopPropagation(); handleSyncItem(item, 'upload'); }}
-                                                                                    disabled={!!processing || item.status === 'missing_local'}
-                                                                                    title="Upload to Remote"
-                                                                                    className="p-1.5 rounded-lg border border-neutral-800 bg-[#0d0e12]/60 text-neutral-400 hover:text-orange-500 hover:bg-neutral-900 disabled:opacity-20 transition-colors"
-                                                                                >
-                                                                                    <Upload size={12} />
-                                                                                </button>
-                                                                                <button
-                                                                                    onClick={(e) => { e.stopPropagation(); handleSyncItem(item, 'download'); }}
-                                                                                    disabled={!!processing || item.status === 'missing_remote'}
-                                                                                    title="Download to Local"
-                                                                                    className="p-1.5 rounded-lg border border-neutral-800 bg-[#0d0e12]/60 text-neutral-400 hover:text-emerald-400 hover:bg-neutral-900 disabled:opacity-20 transition-colors"
-                                                                                >
-                                                                                    <Download size={12} />
-                                                                                </button>
-                                                                            </>
-                                                                        )}
-                                                                    </>
-                                                                )}
-
-                                                                {/* Directory Actions */}
-                                                                {item.isDirectory && (
-                                                                    <div className="flex items-center space-x-1">
-                                                                        <button
-                                                                            onClick={() => fetchDiff(currentPath === '/' ? item.name : `${currentPath}/${item.name}`)}
-                                                                            className="bg-[#0d0e12]/60 border border-neutral-800 px-3 py-1 rounded-lg text-[10px] font-bold text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200 mr-1.5 uppercase transition-colors"
-                                                                        >
-                                                                            Open
-                                                                        </button>
-
-                                                                        {item.status !== 'synchronized' && (
-                                                                            <>
-                                                                                <button
-                                                                                    onClick={(e) => { e.stopPropagation(); handleFolderSync(item, 'upload'); }}
-                                                                                    disabled={!!processing || item.status === 'missing_local'}
-                                                                                    title="Recursively Upload"
-                                                                                    className="p-1.5 rounded-lg border border-neutral-800 bg-[#0d0e12]/60 text-neutral-400 hover:text-orange-500 disabled:opacity-20 transition-colors"
-                                                                                >
-                                                                                    <Upload size={12} />
-                                                                                </button>
-                                                                                <button
-                                                                                    onClick={(e) => { e.stopPropagation(); handleFolderSync(item, 'download'); }}
-                                                                                    disabled={!!processing || item.status === 'missing_remote'}
-                                                                                    title="Recursively Download"
-                                                                                    className="p-1.5 rounded-lg border border-neutral-800 bg-[#0d0e12]/60 text-neutral-400 hover:text-emerald-400 disabled:opacity-20 transition-colors"
-                                                                                >
-                                                                                    <Download size={12} />
-                                                                                </button>
-                                                                            </>
-                                                                        )}
-                                                                    </div>
-                                                                )}
-                                                            </div>
-                                                        </div>
-
-                                                        {/* Remote Side */}
-                                                        <div className="col-span-4 p-3 flex items-center justify-end overflow-hidden">
-                                                            <div className="flex items-center min-w-0 justify-end flex-1 pr-1">
-                                                                <div className="truncate min-w-0 flex-1 text-right">
-                                                                    <div className={`truncate text-xs ${!item.remote ? 'text-neutral-600 italic' : 'text-neutral-200 font-semibold group-hover:text-orange-400 transition-colors uppercase'}`}>
-                                                                        {item.name}
-                                                                    </div>
-                                                                    {item.remote && !item.isDirectory && (
-                                                                        <div className="text-[9px] text-neutral-500 font-mono mt-0.5 uppercase">
-                                                                            {formatSize(item.remote.size)} • {new Date(item.remote.modifiedAt).toLocaleDateString()}
-                                                                        </div>
-                                                                    )}
-                                                                </div>
-                                                                {item.isDirectory ? (
-                                                                    <Folder size={14} className="text-amber-500 ml-3 flex-shrink-0" />
-                                                                ) : (
-                                                                    <File size={14} className={`ml-3 flex-shrink-0 ${!item.remote ? 'text-neutral-700' : 'text-neutral-400'}`} />
-                                                                )}
-                                                            </div>
-                                                        </div>
-
+                                                    <div style={style}>
+                                                        <DiffRow
+                                                            item={item}
+                                                            currentPath={currentPath}
+                                                            selectedItems={selectedItems}
+                                                            toggleSelection={toggleSelection}
+                                                            processing={processing}
+                                                            setContentDiffFile={setContentDiffFile}
+                                                            handleSyncItem={handleSyncItem}
+                                                            handleFolderSync={handleFolderSync}
+                                                            fetchDiff={fetchDiff}
+                                                            formatSize={formatSize}
+                                                            getStatusColor={getStatusColor}
+                                                            getStatusIcon={getStatusIcon}
+                                                        />
                                                     </div>
                                                 );
                                             }}
@@ -1043,323 +816,26 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose, i
                         );
                     })()}
 
-                    {/* Docked Terminal Console */}
-                    {showLogs && (
-                        <div className="border-t border-neutral-800/60 bg-[#0d0e12]/85 flex flex-col h-64 select-none shrink-0 animate-in slide-in-from-bottom duration-250">
-                            {/* Terminal Header */}
-                            <div className="flex justify-between items-center px-4 py-2 border-b border-neutral-800/60 bg-[#0d0e12]/40">
-                                <div className="flex items-center gap-2">
-                                    <Terminal size={12} className="text-orange-500" />
-                                    <span className="text-[10px] font-black text-neutral-300 uppercase tracking-widest font-outfit">
-                                        SYSTEM ACTIVITY LOG
-                                    </span>
-                                    {isSyncing && (
-                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
-                                    )}
-                                </div>
-                                <div className="flex items-center gap-2">
-                                    <button
-                                        onClick={handleClearLogs}
-                                        className="flex items-center gap-1 px-2.5 py-1 text-[10px] font-bold text-neutral-400 hover:text-red-400 border border-neutral-800 hover:border-red-900/40 bg-neutral-900/60 transition-colors uppercase tracking-wider rounded-md"
-                                        title="Clear Log History"
-                                    >
-                                        <Trash2 size={11} />
-                                        Clear
-                                    </button>
-                                    <button
-                                        onClick={() => setShowLogs(false)}
-                                        className="p-1.5 hover:bg-neutral-800 text-neutral-400 hover:text-neutral-250 transition-colors border border-neutral-800 rounded-md"
-                                        title="Minimize Terminal"
-                                    >
-                                        <X size={12} />
-                                    </button>
-                                </div>
-                            </div>
-                            
-                            {/* Terminal Logs View */}
-                            <div 
-                                ref={consoleContainerRef}
-                                className="flex-1 p-3 overflow-y-auto font-mono text-[11px] space-y-1.5 custom-scrollbar bg-[#0d0e12]/10"
-                            >
-                                {logs.map((log, idx) => (
-                                    <div 
-                                        key={log.id || idx} 
-                                        className={`flex items-start border-l-2 pl-2 py-0.5 ${
-                                            log.type === 'error' ? 'text-red-400 border-red-500 bg-red-950/5' :
-                                            log.type === 'success' ? 'text-emerald-400 border-emerald-500 bg-emerald-950/5' : 
-                                            'text-neutral-350 border-neutral-700'
-                                        }`}
-                                    >
-                                        <span className="text-neutral-600 mr-2 flex-shrink-0 select-none">
-                                            [{new Date(log.created_at || log.timestamp || Date.now()).toLocaleTimeString()}]
-                                        </span>
-                                        <span className={`mr-2.5 font-bold flex-shrink-0 select-none text-[10px] tracking-wider ${
-                                            log.type === 'error' ? 'text-red-500' :
-                                            log.type === 'success' ? 'text-emerald-500' : 
-                                            'text-neutral-500'
-                                        }`}>
-                                            [{log.type.toUpperCase()}]
-                                        </span>
-                                        <span className="break-all whitespace-pre-wrap uppercase">{log.message}</span>
-                                    </div>
-                                ))}
-                                {logs.length === 0 && (
-                                    <div className="text-neutral-600 text-center py-8 uppercase text-xs font-bold tracking-wider">
-                                        No sync activity recorded.
-                                    </div>
-                                )}
-                            </div>
-                        </div>
+                    {/* Docked Terminal Co                    {showLogs && (
+                        <LogsPanel
+                            consoleContainerRef={consoleContainerRef}
+                            logs={logs}
+                            handleClearLogs={handleClearLogs}
+                            setShowLogs={setShowLogs}
+                        />
                     )}
 
                     {/* AI Copilot Console */}
                     {showCopilot && (
-                        <div className="border-t border-neutral-800/60 bg-[#0d0e12]/85 flex flex-col h-64 select-none shrink-0 animate-in slide-in-from-bottom duration-250">
-                            {/* Terminal Header */}
-                            <div className="flex justify-between items-center px-4 py-2 border-b border-neutral-800/60 bg-[#0d0e12]/40">
-                                <div className="flex items-center gap-2">
-                                    <Sparkles size={12} className="text-emerald-400 animate-pulse" />
-                                    <span className="text-[10px] font-black text-neutral-300 uppercase tracking-widest font-outfit">
-                                        AI COPILOT // DIFF EXPLANATION
-                                    </span>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                    {!showCopilotSettings && copilotEnabled && (
-                                        <button
-                                            onClick={generateAiExplanation}
-                                            disabled={copilotLoading}
-                                            className="flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-bold text-neutral-400 hover:text-emerald-400 border border-neutral-800 hover:border-emerald-900/40 bg-neutral-900/60 disabled:opacity-50 transition-colors uppercase tracking-wider rounded-md"
-                                            title="Re-analyze File Diffs"
-                                        >
-                                            <RefreshCw size={11} className={copilotLoading ? 'animate-spin' : ''} />
-                                            Re-Analyze
-                                        </button>
-                                    )}
-                                    <button
-                                        onClick={() => setShowCopilotSettings(!showCopilotSettings)}
-                                        className={`flex items-center gap-1 px-2.5 py-1 text-[10px] font-bold border rounded-md transition-colors uppercase tracking-wider ${
-                                            showCopilotSettings 
-                                                ? 'bg-orange-600 text-black border-orange-700' 
-                                                : 'text-neutral-400 border-neutral-800 hover:text-orange-500 hover:border-orange-900/40 bg-neutral-900/60'
-                                        }`}
-                                        title="Copilot Settings"
-                                    >
-                                        <Settings size={11} className={showCopilotSettings ? 'animate-spin' : ''} />
-                                        Settings
-                                    </button>
-                                    <button
-                                        onClick={() => setShowCopilot(false)}
-                                        className="p-1.5 hover:bg-neutral-800 text-neutral-400 hover:text-neutral-250 transition-colors border border-neutral-800 rounded-md"
-                                        title="Minimize Copilot"
-                                    >
-                                        <X size={12} />
-                                    </button>
-                                </div>
-                            </div>
-                            
-                            {/* Terminal Content View */}
-                            <div className="flex-1 p-4 overflow-y-auto font-mono text-[11px] custom-scrollbar bg-[#0d0e12]/10 text-neutral-300">
-                                {showCopilotSettings ? (
-                                    <div className="max-w-md mx-auto space-y-3.5 py-1 font-mono text-[11px] uppercase">
-                                        <div className="flex items-center gap-1.5 mb-2 pb-1.5 border-b border-neutral-800/60">
-                                            <span className="w-1.5 h-3 bg-orange-500 block"></span>
-                                            <span className="text-[10px] font-black text-neutral-400 tracking-widest font-outfit">
-                                                AI COPILOT CONFIGURATION
-                                            </span>
-                                        </div>
-                                        
-                                        {/* Toggle Enable */}
-                                        <div className="flex items-center justify-between bg-neutral-900/40 border border-neutral-800/60 p-2.5 rounded-xl">
-                                            <div className="space-y-0.5 pr-4">
-                                                <span className="font-bold text-neutral-300 block">ENABLE AI COPILOT</span>
-                                                <span className="text-[9px] text-neutral-500 font-normal block leading-normal">
-                                                    Enable or disable Gemini diff explanations
-                                                </span>
-                                            </div>
-                                            <label className="relative inline-flex items-center cursor-pointer">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={copilotEnabled}
-                                                    onChange={(e) => {
-                                                        const val = e.target.checked;
-                                                        setCopilotEnabled(val);
-                                                        localStorage.setItem('gemini_copilot_enabled', String(val));
-                                                    }}
-                                                    className="sr-only peer"
-                                                />
-                                                <div className="w-9 h-5 bg-neutral-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-neutral-400 after:border-neutral-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-600 peer-checked:after:bg-black"></div>
-                                            </label>
-                                        </div>
-
-                                        {/* API Key Input */}
-                                        <div className="bg-neutral-900/40 border border-neutral-800/60 p-2.5 rounded-xl space-y-1.5">
-                                            <div className="space-y-0.5">
-                                                <span className="font-bold text-neutral-300 block">CUSTOM GEMINI API KEY</span>
-                                                <span className="text-[9px] text-neutral-505 font-normal block leading-normal">
-                                                    Stored locally in your browser. Defaults to server key if empty.
-                                                </span>
-                                            </div>
-                                            <input
-                                                type="password"
-                                                value={customApiKey}
-                                                onChange={(e) => {
-                                                    const val = e.target.value;
-                                                    setCustomApiKey(val);
-                                                    localStorage.setItem('gemini_custom_api_key', val);
-                                                }}
-                                                placeholder="AIzaSy..."
-                                                className="w-full bg-[#0d0e12]/60 border border-neutral-800 text-xs px-2.5 py-1.5 text-neutral-200 outline-none focus:border-orange-500 rounded-lg transition-colors"
-                                            />
-                                        </div>
-
-                                        {/* Model Selection */}
-                                        <div className="bg-neutral-900/40 border border-neutral-800/60 p-2.5 rounded-xl space-y-1.5">
-                                            <div className="space-y-0.5">
-                                                <span className="font-bold text-neutral-300 block">AI GEMINI MODEL</span>
-                                                <span className="text-[9px] text-neutral-500 font-normal block leading-normal">
-                                                    Select AI model to perform the analysis
-                                                </span>
-                                            </div>
-                                            <input
-                                                type="text"
-                                                list="gemini-models"
-                                                value={selectedModel}
-                                                onChange={(e) => {
-                                                    const val = e.target.value;
-                                                    setSelectedModel(val);
-                                                    localStorage.setItem('gemini_copilot_model', val);
-                                                }}
-                                                placeholder="gemini-1.5-flash"
-                                                className="w-full bg-[#0d0e12]/60 border border-neutral-800 text-xs px-2.5 py-1.5 text-neutral-200 outline-none focus:border-orange-500 rounded-lg transition-colors"
-                                            />
-                                            <datalist id="gemini-models">
-                                                <option value="gemini-2.5-flash">GEMINI 2.5 FLASH (RECOMMENDED)</option>
-                                                <option value="gemini-2.5-pro">GEMINI 2.5 PRO</option>
-                                                <option value="gemini-2.0-flash">GEMINI 2.0 FLASH</option>
-                                                <option value="gemini-2.0-flash-thinking-exp">GEMINI 2.0 FLASH THINKING</option>
-                                                <option value="gemini-1.5-flash">GEMINI 1.5 FLASH</option>
-                                                <option value="gemini-1.5-pro">GEMINI 1.5 PRO</option>
-                                                <option value="gemini-1.5-flash-8b">GEMINI 1.5 FLASH 8B</option>
-                                            </datalist>
-                                        </div>
-
-                                        {/* Auto Analyze Trigger */}
-                                        <div className="flex items-center justify-between bg-neutral-900/40 border border-neutral-800/60 p-2.5 rounded-xl">
-                                            <div className="space-y-0.5 pr-4">
-                                                <span className="font-bold text-neutral-300 block">AUTO RUN ON OPEN</span>
-                                                <span className="text-[9px] text-neutral-500 font-normal block leading-normal">
-                                                    Automatically trigger analysis when copilot is opened
-                                                </span>
-                                            </div>
-                                            <label className="relative inline-flex items-center cursor-pointer">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={copilotAutoAnalyze}
-                                                    onChange={(e) => {
-                                                        const val = e.target.checked;
-                                                        setCopilotAutoAnalyze(val);
-                                                        localStorage.setItem('gemini_copilot_auto_analyze', String(val));
-                                                    }}
-                                                    className="sr-only peer"
-                                                />
-                                                <div className="w-9 h-5 bg-neutral-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-neutral-400 after:border-neutral-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-600 peer-checked:after:bg-black"></div>
-                                            </label>
-                                        </div>
-
-                                        <button
-                                            onClick={() => setShowCopilotSettings(false)}
-                                            className="w-full py-2 bg-neutral-900 border border-neutral-800 hover:bg-neutral-850 hover:text-white text-neutral-400 font-bold transition-colors rounded-lg text-center"
-                                        >
-                                            SAVE & BACK
-                                        </button>
-                                    </div>
-                                ) : !copilotEnabled ? (
-                                    <div className="flex flex-col items-center justify-center h-full space-y-3.5 text-center px-6">
-                                        <AlertCircle size={20} className="text-neutral-500 animate-pulse" />
-                                        <div className="space-y-1">
-                                            <span className="text-neutral-400 font-bold uppercase text-[11px] block">AI COPILOT IS CURRENTLY DISABLED</span>
-                                            <span className="text-neutral-500 text-[10px] uppercase block leading-relaxed max-w-sm mx-auto">
-                                                Enable it below or configure custom model settings
-                                            </span>
-                                        </div>
-                                        <div className="flex gap-3 justify-center">
-                                            <button
-                                                onClick={() => {
-                                                    setCopilotEnabled(true);
-                                                    localStorage.setItem('gemini_copilot_enabled', 'true');
-                                                    setTimeout(() => {
-                                                        generateAiExplanation();
-                                                    }, 50);
-                                                }}
-                                                className="px-4 py-1.5 bg-emerald-950/25 text-emerald-450 border border-emerald-900/40 hover:bg-emerald-900 hover:text-black font-bold text-xs transition-colors rounded-lg uppercase tracking-wider"
-                                            >
-                                                ENABLE COPILOT
-                                            </button>
-                                            <button
-                                                onClick={() => setShowCopilotSettings(true)}
-                                                className="px-4 py-1.5 bg-neutral-900 border border-neutral-800 hover:bg-neutral-800 hover:text-white text-neutral-400 font-bold text-xs transition-colors rounded-lg uppercase tracking-wider"
-                                            >
-                                                OPEN CONFIG
-                                            </button>
-                                        </div>
-                                    </div>
-                                ) : copilotLoading ? (
-                                    <div className="flex flex-col items-center justify-center h-full space-y-2 uppercase text-neutral-500 font-bold tracking-wider">
-                                        <div className="flex space-x-1.5 mb-1.5">
-                                            <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></span>
-                                            <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
-                                            <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
-                                        </div>
-                                        <span>CONNECTING TO GEMINI API SERVICE...</span>
-                                        <span className="text-[9px] text-neutral-500 font-normal">ANALYZING CHANGED FILES STRUCTURE</span>
-                                    </div>
-                                ) : copilotError ? (
-                                    <div className="flex flex-col items-center justify-center h-full space-y-3.5 text-center px-6">
-                                        <AlertCircle size={20} className="text-red-500 animate-pulse" />
-                                        <div className="space-y-1">
-                                            <span className="text-red-400 font-bold uppercase text-[11px] block">ANALYSIS FAILURE</span>
-                                            <span className="text-neutral-500 text-[10px] uppercase block leading-relaxed">{copilotError}</span>
-                                        </div>
-                                        {copilotError.includes('GEMINI_API_KEY_MISSING') && (
-                                            <div className="text-[9px] bg-red-950/20 text-red-400 border border-red-900/30 p-2.5 select-all max-w-md mx-auto rounded-lg">
-                                                Configure custom API key in settings or set server env:
-                                                <br />
-                                                GEMINI_API_KEY=AIzaSy...
-                                            </div>
-                                        )}
-                                        <div className="flex gap-3 justify-center">
-                                            <button
-                                                onClick={generateAiExplanation}
-                                                className="px-4 py-1.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-350 border border-neutral-800 text-xs font-bold uppercase tracking-wider transition-colors rounded-lg"
-                                            >
-                                                RETRY ANALYSIS
-                                            </button>
-                                            <button
-                                                onClick={() => setShowCopilotSettings(true)}
-                                                className="px-4 py-1.5 bg-emerald-950/20 text-emerald-400 border border-emerald-900/40 hover:bg-emerald-900 hover:text-black font-bold text-xs transition-colors rounded-lg uppercase tracking-wider"
-                                            >
-                                                CONFIGURE API KEY
-                                            </button>
-                                        </div>
-                                    </div>
-                                ) : copilotExplanation ? (
-                                    <div className="whitespace-pre-wrap leading-relaxed select-text font-mono text-[11px] text-emerald-400/90 max-w-4xl mx-auto uppercase">
-                                        {copilotExplanation}
-                                    </div>
-                                ) : (
-                                    <div className="flex flex-col items-center justify-center h-full space-y-3 text-center">
-                                        <Sparkles size={16} className="text-neutral-500 animate-pulse" />
-                                        <span className="text-neutral-500 uppercase text-[11px] font-bold tracking-wider">Click start to analyze filesystem difference</span>
-                                        <button
-                                            onClick={generateAiExplanation}
-                                            className="px-4 py-1.5 bg-emerald-950/20 text-emerald-400 border border-emerald-900/40 hover:bg-emerald-900 hover:text-black font-bold text-xs transition-colors rounded-lg uppercase tracking-wider"
-                                        >
-                                            Start AI Analysis
-                                        </button>
-                                    </div>
-                                )}
-                            </div>
-                        </div>
+                        <CopilotPanel
+                            showCopilotSettings={showCopilotSettings}
+                            setShowCopilotSettings={setShowCopilotSettings}
+                            copilotLoading={copilotLoading}
+                            copilotExplanation={copilotExplanation}
+                            copilotError={copilotError}
+                            generateAiExplanation={generateAiExplanation}
+                            setShowCopilot={setShowCopilot}
+                        />
                     )}
                 </div>
             </div>
