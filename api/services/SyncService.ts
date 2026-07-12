@@ -854,7 +854,7 @@ class SyncSession {
 
     // Persist to file-based LogStore (fire and forget)
     try {
-      logStore.addLog(this.connectionId, type, message);
+      await logStore.addLog(this.connectionId, type, message);
     } catch (e) {
       console.error('Failed to save log to LogStore', e);
     }
@@ -878,7 +878,7 @@ class SyncSession {
 
   private async recordTransfer(bytes: number, direction: 'upload' | 'download') {
     try {
-      logStore.addTransferStat(this.connectionId, bytes, direction);
+      await logStore.addTransferStat(this.connectionId, bytes, direction);
     } catch (e) {
       console.error('Failed to save transfer stats', e);
     }
@@ -973,28 +973,31 @@ class SyncSession {
     }, 3000);
   }
 
-  private closeSession() {
+  private async closeSession() {
     if (!this.activeSession) return;
     
     this.activeSession.duration = Date.now() - this.sessionStartTime;
     try {
-      logStore.addSyncSession(this.activeSession);
-      this.log('success', `Completed sync session: ${this.activeSession.id} (${this.activeSession.files.length} files processed)`);
+      await logStore.addSyncSession(this.activeSession);
+      await this.log('success', `Completed sync session: ${this.activeSession.id} (${this.activeSession.files.length} files processed)`);
     } catch (e) {
       console.error('Failed to save sync session to LogStore', e);
     }
 
     // Update last_sync_time/duration/status in database
     const sessionData = this.activeSession;
-    getDb().then(db => {
-      db.run(
+    try {
+      const db = await getDb();
+      await db.run(
         `UPDATE ftp_connections SET last_sync_time = ?, last_sync_duration = ?, last_sync_status = ? WHERE id = ?`,
         new Date().toISOString(),
         sessionData.duration,
         sessionData.status,
         this.connectionId
-      ).catch((err: any) => console.error('Failed to update last_sync info:', err));
-    }).catch((err: any) => console.error('Failed to get db for last_sync update:', err));
+      );
+    } catch (err: any) {
+      console.error('Failed to update last_sync info:', err);
+    }
     
     this.activeSession = null;
     if (this.sessionCloseTimer) {
@@ -2211,10 +2214,10 @@ class SyncManager extends EventEmitter {
   public async resumeSync(connectionId: number) { ... }
   */
 
-  public getStatus(connectionId: number) {
+  public async getStatus(connectionId: number) {
     const session = this.sessions.get(connectionId);
     // Merge persisted logs with fresh in-memory logs for real-time accuracy
-    const dbLogs = logStore.getLogs(connectionId, 10);
+    const dbLogs = await logStore.getLogs(connectionId, 10);
     const inMemoryLogs = session ? session.getLogs() : [];
 
     // Combine: use in-memory first (most recent), fill with DB logs

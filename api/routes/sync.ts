@@ -24,9 +24,9 @@ router.post('/stop', async (req: Request, res: Response) => {
 });
 
 
-router.get('/status/:id', (req: Request, res: Response) => {
+router.get('/status/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
-  const status = syncManager.getStatus(parseInt(id));
+  const status = await syncManager.getStatus(parseInt(id));
   res.json(status);
 });
 

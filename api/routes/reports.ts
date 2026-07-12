@@ -24,15 +24,15 @@ router.get('/dashboard/summary', async (req, res) => {
     });
 
     const activeIds = syncManager.getActiveConnections();
-    const stats = logStore.getAllStats();
+    const stats = await logStore.getAllStats();
     
-    const rawLogs = logStore.getAllLogs(30);
+    const rawLogs = await logStore.getAllLogs(30);
     const logs = rawLogs.map(l => ({
       ...l,
       connection_name: connMap[l.connection_id]?.name || 'Unknown'
     }));
 
-    const rawSessions = logStore.getAllSyncSessions(30);
+    const rawSessions = await logStore.getAllSyncSessions(30);
     const sessions = rawSessions.map(s => ({
       ...s,
       connection_name: connMap[s.connection_id]?.name || 'Unknown'
@@ -59,7 +59,7 @@ router.get('/logs/:connectionId', async (req, res) => {
     const { connectionId } = req.params;
     const { limit = 200 } = req.query;
 
-    const logs = logStore.getLogs(parseInt(connectionId), parseInt(limit as string));
+    const logs = await logStore.getLogs(parseInt(connectionId), parseInt(limit as string));
 
     res.json({ logs, total: logs.length });
   } catch (error) {
@@ -71,7 +71,7 @@ router.get('/logs/:connectionId', async (req, res) => {
 router.post('/logs/clear/:connectionId', async (req, res) => {
   try {
     const { connectionId } = req.params;
-    logStore.clearLogs(parseInt(connectionId));
+    await logStore.clearLogs(parseInt(connectionId));
     res.json({ success: true });
   } catch (error) {
     console.error('Failed to clear logs:', error);
@@ -83,7 +83,7 @@ router.get('/stats/:connectionId', async (req, res) => {
   try {
     const { connectionId } = req.params;
 
-    const stats = logStore.getStats(parseInt(connectionId));
+    const stats = await logStore.getStats(parseInt(connectionId));
 
     res.json(stats);
   } catch (error) {
@@ -96,7 +96,7 @@ router.get('/sessions/:connectionId', async (req, res) => {
   try {
     const { connectionId } = req.params;
     const { limit = 50 } = req.query;
-    const sessions = logStore.getSyncSessions(parseInt(connectionId), parseInt(limit as string));
+    const sessions = await logStore.getSyncSessions(parseInt(connectionId), parseInt(limit as string));
     res.json({ sessions });
   } catch (error) {
     console.error('Failed to fetch sync sessions:', error);
@@ -107,7 +107,7 @@ router.get('/sessions/:connectionId', async (req, res) => {
 router.post('/sessions/clear/:connectionId', async (req, res) => {
   try {
     const { connectionId } = req.params;
-    logStore.clearSyncSessions(parseInt(connectionId));
+    await logStore.clearSyncSessions(parseInt(connectionId));
     res.json({ success: true });
   } catch (error) {
     console.error('Failed to clear sync sessions:', error);
@@ -118,7 +118,7 @@ router.post('/sessions/clear/:connectionId', async (req, res) => {
 router.get('/heatmap/:connectionId', async (req, res) => {
   try {
     const { connectionId } = req.params;
-    const data = logStore.getHeatmapData(parseInt(connectionId));
+    const data = await logStore.getHeatmapData(parseInt(connectionId));
     res.json(data);
   } catch (error) {
     console.error('Failed to fetch heatmap data:', error);
