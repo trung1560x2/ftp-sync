@@ -47,6 +47,9 @@ export function encrypt(text: string): string {
 
 export function decrypt(text: string): string {
   try {
+    if (!text || !text.includes(':')) {
+      throw new Error('Invalid encrypted text format');
+    }
     const textParts = text.split(':');
     const iv = Buffer.from(textParts.shift()!, 'hex');
     const encryptedText = Buffer.from(textParts.join(':'), 'hex');
@@ -54,9 +57,8 @@ export function decrypt(text: string): string {
     let decrypted = decipher.update(encryptedText);
     decrypted = Buffer.concat([decrypted, decipher.final()]);
     return decrypted.toString();
-  } catch (error) {
-    // Nếu giải mã thất bại (ví dụ do data cũ là bcrypt hash), trả về text gốc hoặc null
-    return '';
+  } catch (error: any) {
+    throw new Error(`Decryption failed: ${error.message}`);
   }
 }
 

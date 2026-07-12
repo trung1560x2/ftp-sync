@@ -13,15 +13,13 @@ describe('Encryption Utils', () => {
       expect(decrypted).toBe(originalText);
     });
 
-    it('should return empty string on decrypt failure', () => {
+    it('should throw on decrypt failure', () => {
       const invalidCipher = 'invalid-cipher-text-no-colon';
-      const decrypted = decrypt(invalidCipher);
-      expect(decrypted).toBe('');
+      expect(() => decrypt(invalidCipher)).toThrow();
     });
 
-    it('should return empty string when decrypting malformed data', () => {
-      const decrypted = decrypt('abc:def');
-      expect(decrypted).toBe('');
+    it('should throw when decrypting malformed data', () => {
+      expect(() => decrypt('abc:def')).toThrow();
     });
   });
 

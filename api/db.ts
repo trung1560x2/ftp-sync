@@ -123,3 +123,10 @@ export const getDb = async () => {
   return db;
 };
 
+export const closeDb = async () => {
+  if (db) {
+    await db.close();
+    db = null;
+  }
+};
+

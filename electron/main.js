@@ -65,6 +65,18 @@ function createWindow() {
     icon: path.join(__dirname, '../dist/icon.png')
   });
 
+  // Security Hardening: Block navigation outside internal server origin
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    try {
+      const parsedUrl = new URL(url);
+      if (parsedUrl.origin !== `http://127.0.0.1:${serverPort}`) {
+        event.preventDefault();
+      }
+    } catch (e) {
+      event.preventDefault();
+    }
+  });
+
   // Load backend and then URL
   // We can just rely on startServer having updated the mainWindow logURL if already running?
   // Or better call startServer here if not started?

@@ -22,6 +22,7 @@ import contentDiffRoutes from './routes/contentDiff.js'
 import aiRoutes from './routes/ai.js'
 import terminalRoutes from './routes/terminal.js'
 import { logStore } from './services/LogStore.js'
+import { requireAuth } from './middleware/auth.js'
 
 // for esm mode
 const __filename = fileURLToPath(import.meta.url)
@@ -33,6 +34,13 @@ dotenv.config()
 const app: express.Application = express()
 
 app.use(cors())
+app.use((_req, res, next) => {
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self' http://127.0.0.1:* ws://127.0.0.1:*; script-src 'self' 'unsafe-inline' 'unsafe-eval' vs:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:;"
+  );
+  next();
+})
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true, limit: '10mb' }))
 
@@ -44,6 +52,23 @@ app.use(express.static(distPath))
  * API Routes
  */
 app.use('/api/auth', authRoutes)
+
+/**
+ * health
+ */
+app.use(
+  '/api/health',
+  (_req: Request, res: Response): void => {
+    res.status(200).json({
+      success: true,
+      message: 'ok',
+    })
+  },
+)
+
+// Authenticate all remaining endpoints
+app.use(requireAuth)
+
 app.use('/api/ftp-connections', ftpRoutes)
 app.use('/api/sync', syncRoutes)
 app.use('/api/files', fileRoutes)
@@ -54,18 +79,6 @@ app.use('/api/content-diff', contentDiffRoutes)
 app.use('/api/ai', aiRoutes)
 app.use('/api/terminal', terminalRoutes)
 
-/**
- * health
- */
-app.use(
-  '/api/health',
-  (req: Request, res: Response): void => {
-    res.status(200).json({
-      success: true,
-      message: 'ok',
-    })
-  },
-)
 
 /**
  * error handler middleware
