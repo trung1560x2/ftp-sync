@@ -1,19 +1,20 @@
 import React from 'react';
 import { Folder, File, Eye, Upload, Download } from 'lucide-react';
+import { DiffItem } from '../VisualDiffModal';
 
 interface DiffRowProps {
-  item: any;
+  item: DiffItem;
   currentPath: string;
   selectedItems: Set<string>;
   toggleSelection: (name: string) => void;
   processing: string | null;
   setContentDiffFile: (val: { remotePath: string; fileName: string; status?: string }) => void;
-  handleSyncItem: (item: any, direction: 'upload' | 'download') => void;
-  handleFolderSync: (item: any, direction: 'upload' | 'download') => void;
+  handleSyncItem: (item: DiffItem, direction: 'upload' | 'download') => void;
+  handleFolderSync: (item: DiffItem, direction: 'upload' | 'download') => void;
   fetchDiff: (path?: string) => void;
   formatSize: (size: number) => string;
   getStatusColor: (status: string) => string;
-  getStatusIcon: (item: any) => React.ReactNode;
+  getStatusIcon: (item: DiffItem) => React.ReactNode;
 }
 
 export const DiffRow: React.FC<DiffRowProps> = ({

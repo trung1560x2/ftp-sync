@@ -1,9 +1,17 @@
 import React from 'react';
 import { Trash2, X } from 'lucide-react';
 
+interface LogEntry {
+  id?: number | string;
+  type: 'info' | 'error' | 'success';
+  message: string;
+  created_at?: string;
+  timestamp?: string;
+}
+
 interface LogsPanelProps {
   consoleContainerRef: React.RefObject<HTMLDivElement>;
-  logs: any[];
+  logs: LogEntry[];
   handleClearLogs: () => void;
   setShowLogs: (show: boolean) => void;
 }

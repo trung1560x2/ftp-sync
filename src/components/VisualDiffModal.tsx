@@ -44,7 +44,7 @@ interface Props {
     isSyncing?: boolean;
 }
 
-interface DiffItem {
+export interface DiffItem {
     name: string;           // Remote name (canonical for Linux operations)
     localName: string | null; // Local name (for Windows file operations)
     isDirectory: boolean;
