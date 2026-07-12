@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, RefreshCw, ArrowLeft, ArrowRight, AlertCircle } from 'lucide-react';
+import { X, RefreshCw, ArrowLeft, ArrowRight, AlertCircle, CheckCircle, Download, Upload, Folder, Smartphone, Monitor } from 'lucide-react';
 import { FixedSizeList as List } from 'react-window';
 import ContentDiffModal from './ContentDiffModal';
 import { useSyncProgress } from '../hooks/useSyncProgress';
