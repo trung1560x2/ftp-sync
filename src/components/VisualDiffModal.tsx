@@ -1091,7 +1091,7 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose, i
                                         }`}
                                     >
                                         <span className="text-neutral-600 mr-2 flex-shrink-0 select-none">
-                                            [{new Date(log.created_at || log.timestamp).toLocaleTimeString()}]
+                                            [{new Date(log.created_at || log.timestamp || Date.now()).toLocaleTimeString()}]
                                         </span>
                                         <span className={`mr-2.5 font-bold flex-shrink-0 select-none text-[10px] tracking-wider ${
                                             log.type === 'error' ? 'text-red-500' :

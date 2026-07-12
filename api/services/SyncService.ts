@@ -698,13 +698,6 @@ class SyncSession {
         const delay = 1000 + Math.random() * 2000;
         this.log('info', `Retrying ${filename} due to error (Attempt ${retryCount + 2}/5) in ${Math.round(delay)}ms...`);
 
-        // Force cleanup
-        if (client) {
-          client.trackProgress(); // Clear listener
-          try { client.close(); } catch { }
-          this.removeClient(client);
-          client = null; // Prevent finally from releasing it
-        }
         this.uploadProgress.delete(taskId);
         this.notifyProgress();
 
@@ -1156,10 +1149,11 @@ class SyncSession {
         // Progress Tracking Setup
         // Progress Tracking Setup
         taskId = Date.now().toString() + Math.random().toString(36).substr(2, 9);
+        const currentTaskId = taskId;
         const startTime = Date.now();
         const totalBytes = fs.statSync(localPath).size;
 
-        this.uploadProgress.set(taskId, {
+        this.uploadProgress.set(currentTaskId, {
           type: 'upload',
           filename: localFilename,
           totalBytes,
@@ -1184,14 +1178,14 @@ class SyncSession {
           const remainingBytes = totalBytes - info.bytes;
 
           // Record delta to window
-          const prevProgress = this.uploadProgress.get(taskId);
+          const prevProgress = this.uploadProgress.get(currentTaskId);
           const prevBytes = prevProgress ? prevProgress.bytesTransferred : 0;
           const delta = info.bytes - prevBytes;
           if (delta > 0) {
             this.recordWindowBytes(delta, 'upload');
           }
 
-          this.uploadProgress.set(taskId, {
+          this.uploadProgress.set(currentTaskId, {
             type: 'upload',
             filename: localFilename,
             totalBytes,
@@ -1357,9 +1351,10 @@ class SyncSession {
 
         // Progress Tracking Setup
         taskId = Date.now().toString() + Math.random().toString(36).substr(2, 9);
+        const currentTaskId = taskId;
         const startTime = Date.now();
 
-        this.uploadProgress.set(taskId, {
+        this.uploadProgress.set(currentTaskId, {
           type: 'download',
           filename: path.basename(remoteFilePath),
           totalBytes,
@@ -1386,14 +1381,14 @@ class SyncSession {
           const remainingBytes = Math.max(0, totalBytes - currentTransferred);
 
           // Record delta to window
-          const prevProgress = this.uploadProgress.get(taskId);
+          const prevProgress = this.uploadProgress.get(currentTaskId);
           const prevBytes = prevProgress ? prevProgress.bytesTransferred : offset;
           const delta = currentTransferred - prevBytes;
           if (delta > 0) {
             this.recordWindowBytes(delta, 'download');
           }
 
-          this.uploadProgress.set(taskId, {
+          this.uploadProgress.set(currentTaskId, {
             type: 'download',
             filename: path.basename(remoteFilePath),
             totalBytes,

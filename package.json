@@ -16,9 +16,12 @@
     "dist": "npm run build && npm run build:server && electron-builder",
     "lint": "eslint .",
     "preview": "vite preview",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
     "server:dev": "nodemon",
-    "dev": "concurrently \"npm run client:dev\" \"npm run server:dev\""
+    "dev": "concurrently \"npm run client:dev\" \"npm run server:dev\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
@@ -71,6 +74,7 @@
     "@types/ssh2-sftp-client": "^9.0.6",
     "@vercel/node": "^4.0.0",
     "@vitejs/plugin-react": "^4.4.1",
+    "@vitest/coverage-v8": "^4.1.10",
     "autoprefixer": "^10.4.21",
     "babel-plugin-react-dev-locator": "^1.0.0",
     "concurrently": "^9.2.1",
@@ -93,6 +97,7 @@
     "vite-plugin-monaco-editor": "^1.1.0",
     "vite-plugin-trae-solo-badge": "^1.0.0",
     "vite-tsconfig-paths": "^5.1.4",
+    "vitest": "^3.2.7",
     "wait-on": "^9.0.3"
   },
   "author": "ThanhTrung",

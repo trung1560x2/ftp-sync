@@ -334,7 +334,7 @@ const StatisticsModal: React.FC<Props> = ({ connectionId, serverName, onClose })
                         <XAxis dataKey="date" stroke="#525252" fontSize={9} fontFamily="Courier New" />
                         <YAxis tickFormatter={(value) => formatBytes(value)} stroke="#525252" fontSize={9} width={65} fontFamily="Courier New" />
                         <Tooltip 
-                          formatter={(value: number) => formatBytes(value)} 
+                          formatter={(value: any) => formatBytes(value)} 
                           contentStyle={{ backgroundColor: '#0a0a0c', borderColor: '#262626', color: '#e5e5e5', fontSize: 10, fontFamily: 'monospace' }}
                         />
                         <Legend wrapperStyle={{ fontSize: 10, paddingTop: 10 }} />
