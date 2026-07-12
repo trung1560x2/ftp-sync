@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, RefreshCw, ArrowLeft, ArrowRight, AlertCircle, CheckCircle, Download, Upload, Folder, Smartphone, Monitor } from 'lucide-react';
+import { RefreshCw, ArrowLeft, ArrowRight, AlertCircle, CheckCircle, Download, Upload, Folder, Smartphone, Monitor } from 'lucide-react';
 import { FixedSizeList as List } from 'react-window';
 import ContentDiffModal from './ContentDiffModal';
 import { useSyncProgress } from '../hooks/useSyncProgress';
@@ -67,7 +67,6 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose, i
     const [showCopilotSettings, setShowCopilotSettings] = useState(false);
     const {
         enabled: copilotEnabled,
-        setEnabled: setCopilotEnabled,
         autoAnalyze: copilotAutoAnalyze,
         apiKey: customApiKey,
         model: selectedModel
@@ -284,7 +283,7 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose, i
     // Update selection toggles to work with filteredItems if needed, but usually we select from what is visible
     // For "Select All", we should probably only select visible filtered items
     const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
-    const [openDropdown, setOpenDropdown] = useState<string | null>(null);
+
 
     const toggleSelectAll = () => {
         if (selectedItems.size === filteredItems.length && filteredItems.length > 0) {
@@ -815,8 +814,7 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose, i
                             </div>
                         );
                     })()}
-
-                    {/* Docked Terminal Co                    {showLogs && (
+                    {showLogs && (
                         <LogsPanel
                             consoleContainerRef={consoleContainerRef}
                             logs={logs}
