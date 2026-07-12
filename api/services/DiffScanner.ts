@@ -33,7 +33,7 @@ export interface DiffItem {
   modifiedAt: Date | string;
   relPath: string;
   isDirectChild: boolean;
-  status: 'synchronized' | 'newer_local' | 'newer_remote' | 'missing_local' | 'missing_remote' | 'different_size';
+  status: 'synchronized' | 'newer_local' | 'newer_remote' | 'missing_local' | 'missing_remote' | 'different_size' | 'conflict';
   local: { size: number; modifiedAt: Date | string } | null;
   remote: { size: number; modifiedAt: Date | string } | null;
   containsChanges?: boolean;
@@ -292,7 +292,8 @@ export const scanLocalCached = async (
 export const calculateDiff = (
   remoteFiles: any[],
   localFiles: any[],
-  isRecursive: boolean
+  isRecursive: boolean,
+  lastSyncTime?: number | null
 ): DiffItem[] => {
   const diffMap = new Map<string, DiffItem>();
   const getKey = (p: string) => p.toLowerCase();
@@ -329,10 +330,21 @@ export const calculateDiff = (
         const rTime = item.remote!.modifiedAt instanceof Date ? item.remote!.modifiedAt.getTime() : new Date(item.remote!.modifiedAt).getTime();
         const lTime = new Date(l.modifiedAt).getTime();
 
-        if (l.size !== item.size) item.status = 'different_size';
-        else if (lTime > rTime + TIME_TOLERANCE) item.status = 'newer_local';
-        else if (rTime > lTime + TIME_TOLERANCE) item.status = 'newer_remote';
-        else item.status = 'synchronized';
+        const bothModifiedSinceLastSync = lastSyncTime &&
+          (lTime > lastSyncTime + TIME_TOLERANCE) &&
+          (rTime > lastSyncTime + TIME_TOLERANCE);
+
+        if (bothModifiedSinceLastSync && (l.size !== item.size || Math.abs(lTime - rTime) > TIME_TOLERANCE)) {
+          item.status = 'conflict';
+        } else if (l.size !== item.size) {
+          item.status = 'different_size';
+        } else if (lTime > rTime + TIME_TOLERANCE) {
+          item.status = 'newer_local';
+        } else if (rTime > lTime + TIME_TOLERANCE) {
+          item.status = 'newer_remote';
+        } else {
+          item.status = 'synchronized';
+        }
       }
     } else {
       // New local item

@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { DiffEditor } from '@monaco-editor/react';
-import { X, ArrowRight, ArrowLeft, Loader2, Save, RefreshCw, Smartphone, Monitor } from 'lucide-react';
+import { X, ArrowRight, ArrowLeft, Loader2, Save, RefreshCw, Smartphone, Monitor, ShieldAlert } from 'lucide-react';
 
 interface Props {
     connectionId: number;
     remotePath: string;
     fileName: string;
+    status?: string;
     onClose: () => void;
     onSyncComplete?: () => void;
 }
@@ -53,6 +54,7 @@ const ContentDiffModal: React.FC<Props> = ({
     connectionId,
     remotePath,
     fileName,
+    status,
     onClose,
     onSyncComplete
 }) => {
@@ -237,6 +239,37 @@ const ContentDiffModal: React.FC<Props> = ({
             </button>
           </div>
         </div>
+
+        {/* Conflict Warning Banner */}
+        {status === 'conflict' && !loading && !error && (
+          <div className="bg-red-500/10 border-b border-red-500/25 px-5 py-3 flex items-center justify-between shrink-0 animate-in slide-in-from-top duration-300">
+            <div className="flex items-center space-x-3">
+              <span className="p-1.5 bg-red-950/20 border border-red-500/30 text-red-500 rounded animate-pulse">
+                <ShieldAlert size={14} />
+              </span>
+              <div>
+                <p className="text-xs font-bold text-red-400 uppercase tracking-wide">Xung đột phát hiện / Conflict Detected</p>
+                <p className="text-[10px] text-neutral-400 mt-0.5">Cả tệp cục bộ và máy chủ từ xa đều đã thay đổi sau lần đồng bộ cuối cùng. Hãy chọn một phiên bản để giữ lại hoặc tự chỉnh sửa để ghép tệp.</p>
+              </div>
+            </div>
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => handleSync('download')}
+                disabled={isSyncing}
+                className="px-3 py-1 bg-neutral-900 border border-neutral-800 hover:border-emerald-500/30 hover:text-emerald-400 text-neutral-300 text-[10px] font-bold uppercase tracking-wider rounded transition-all cursor-pointer"
+              >
+                Giữ Remote / Accept Remote
+              </button>
+              <button
+                onClick={() => handleSync('upload')}
+                disabled={isSyncing}
+                className="px-3 py-1 bg-neutral-900 border border-neutral-800 hover:border-orange-500/30 hover:text-orange-400 text-neutral-300 text-[10px] font-bold uppercase tracking-wider rounded transition-all cursor-pointer"
+              >
+                Giữ Local / Accept Local
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Diff Editor */}
         <div className="flex-1 relative bg-[#1e1e1e]">

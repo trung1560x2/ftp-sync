@@ -481,6 +481,56 @@ class LogStore {
         
         return Object.values(heatmapMap);
     }
+
+    public async cleanupOldData(retentionDays: number): Promise<void> {
+        await this.ensureInitialized();
+        const db = await getDb();
+        
+        // Calculate date threshold ISO string
+        const dateLimit = new Date();
+        dateLimit.setDate(dateLimit.getDate() - retentionDays);
+        const dateLimitStr = dateLimit.toISOString();
+
+        await db.exec('BEGIN TRANSACTION;');
+        try {
+            // 1. Delete old logs
+            await db.run('DELETE FROM sync_logs WHERE created_at < ?', dateLimitStr);
+
+            // 2. Delete old transfer stats
+            await db.run('DELETE FROM transfer_stats WHERE created_at < ?', dateLimitStr);
+
+            // 3. Select old sessions to clean up disk backups
+            const oldSessions = await db.all<{ id: string; connection_id: number }[]>(
+                'SELECT id, connection_id FROM sync_sessions WHERE timestamp < ?',
+                dateLimitStr
+            );
+
+            // 4. Delete old sessions from database
+            await db.run('DELETE FROM sync_sessions WHERE timestamp < ?', dateLimitStr);
+
+            await db.exec('COMMIT;');
+
+            // 5. Clean up historical backups on disk
+            if (oldSessions.length > 0) {
+                const baseBackupPath = path.join(this.getBasePath(), 'sync_data', 'history');
+                for (const s of oldSessions) {
+                    try {
+                        const sessionBackupDir = path.join(baseBackupPath, `connection_${s.connection_id}`, s.id);
+                        if (fs.existsSync(sessionBackupDir)) {
+                            fs.removeSync(sessionBackupDir);
+                        }
+                    } catch (err) {
+                        console.error('Failed to clean up old session backup dir during settings cleanup:', err);
+                    }
+                }
+            }
+            console.log(`Cleaned up SQLite logs/sessions older than ${retentionDays} days.`);
+        } catch (err) {
+            await db.exec('ROLLBACK;');
+            console.error('Failed database cleanup transaction:', err);
+            throw err;
+        }
+    }
 }
 
 // Singleton instance

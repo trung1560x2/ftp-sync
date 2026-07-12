@@ -21,6 +21,7 @@ import deploymentRoutes from './routes/deployment.js'
 import contentDiffRoutes from './routes/contentDiff.js'
 import aiRoutes from './routes/ai.js'
 import terminalRoutes from './routes/terminal.js'
+import settingsRoutes from './routes/settings.js'
 import { logStore } from './services/LogStore.js'
 import { requireAuth } from './middleware/auth.js'
 
@@ -78,6 +79,7 @@ app.use('/api/deployment', deploymentRoutes)
 app.use('/api/content-diff', contentDiffRoutes)
 app.use('/api/ai', aiRoutes)
 app.use('/api/terminal', terminalRoutes)
+app.use('/api/settings', settingsRoutes)
 
 
 /**

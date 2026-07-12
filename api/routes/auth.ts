@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import crypto from 'crypto';
 import { getDb } from '../db.js';
+import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
 
@@ -198,6 +199,59 @@ router.post('/logout', async (req: Request, res: Response): Promise<void> => {
   } catch (error: any) {
     console.error('[Auth Logout] Error:', error);
     res.status(500).json({ success: false, error: 'Logout failed' });
+  }
+});
+
+/**
+ * Change Master Password
+ * POST /api/auth/change-password
+ */
+router.post('/change-password', requireAuth, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword || typeof newPassword !== 'string' || newPassword.length < 8) {
+      res.status(400).json({ success: false, error: 'New password must be at least 8 characters long' });
+      return;
+    }
+
+    const db = await getDb();
+    const user = await db.get<{ id: number; password_hash: string; salt: string }>(
+      'SELECT id, password_hash, salt FROM users WHERE username = ?',
+      'master'
+    );
+
+    if (!user) {
+      res.status(404).json({ success: false, error: 'User not found' });
+      return;
+    }
+
+    const isValid = hashPassword(currentPassword, user.salt) === user.password_hash;
+    if (!isValid) {
+      res.status(401).json({ success: false, error: 'Current password is incorrect' });
+      return;
+    }
+
+    const newSalt = crypto.randomBytes(16).toString('hex');
+    const newPasswordHash = hashPassword(newPassword, newSalt);
+
+    await db.run(
+      'UPDATE users SET password_hash = ?, salt = ? WHERE username = ?',
+      newPasswordHash,
+      newSalt,
+      'master'
+    );
+
+    // Revoke all other sessions when password is changed
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const currentToken = authHeader.substring(7);
+      await db.run('DELETE FROM sessions WHERE token != ? AND user_id = ?', currentToken, user.id);
+    }
+
+    res.json({ success: true, message: 'Password changed successfully' });
+  } catch (error: any) {
+    console.error('[Auth Change Password] Error:', error);
+    res.status(500).json({ success: false, error: 'Failed to change password' });
   }
 });
 

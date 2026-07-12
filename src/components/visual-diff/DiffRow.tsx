@@ -7,7 +7,7 @@ interface DiffRowProps {
   selectedItems: Set<string>;
   toggleSelection: (name: string) => void;
   processing: string | null;
-  setContentDiffFile: (val: { remotePath: string; fileName: string }) => void;
+  setContentDiffFile: (val: { remotePath: string; fileName: string; status?: string }) => void;
   handleSyncItem: (item: any, direction: 'upload' | 'download') => void;
   handleFolderSync: (item: any, direction: 'upload' | 'download') => void;
   fetchDiff: (path?: string) => void;
@@ -81,7 +81,7 @@ export const DiffRow: React.FC<DiffRowProps> = ({
                   onClick={(e) => {
                     e.stopPropagation();
                     const remotePath = currentPath === '/' ? `/${item.name}` : `${currentPath}/${item.name}`;
-                    setContentDiffFile({ remotePath, fileName: item.name });
+                    setContentDiffFile({ remotePath, fileName: item.name, status: item.status });
                   }}
                   disabled={!!processing}
                   title="Compare Content"

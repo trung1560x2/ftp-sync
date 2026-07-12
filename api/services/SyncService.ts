@@ -2091,6 +2091,12 @@ class SyncManager extends EventEmitter {
     return session.isCacheWarmed();
   }
 
+  public clearAllCacheWarmed(): void {
+    for (const session of this.sessions.values()) {
+      session.isLocalCacheWarmed = false;
+    }
+  }
+
   // Removed suspend/resume exports since we use shared connection
   /* 
   public async suspendSync(connectionId: number) { ... }

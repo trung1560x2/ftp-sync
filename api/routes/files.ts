@@ -307,7 +307,10 @@ router.get('/diff/:id', async (req: Request, res: Response) => {
       ]);
       console.log(`[Diff] Total scan took ${Date.now() - tScanStart}ms (Attempts: ${attempts})`);
 
-      const diffs = calculateDiff(remoteFiles, localFiles, isRecursive);
+      const lastSyncDate = config.last_sync_time ? new Date(config.last_sync_time) : null;
+      const lastSyncTime = lastSyncDate && !isNaN(lastSyncDate.getTime()) ? lastSyncDate.getTime() : null;
+
+      const diffs = calculateDiff(remoteFiles, localFiles, isRecursive, lastSyncTime);
 
       res.json({ diffs, currentPath: targetDir });
       return; // Success, exit function

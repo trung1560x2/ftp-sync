@@ -3,7 +3,8 @@ import { useState, useEffect } from 'react';
 import ConnectionManager from './pages/ConnectionManager';
 import TerminalView from './components/terminal/TerminalView';
 import OverviewDashboard from './pages/OverviewDashboard';
-import { Terminal, Server, LayoutDashboard, Lock, Unlock, Eye, EyeOff, ShieldAlert, Key, Check, Loader2, LogOut } from 'lucide-react';
+import SettingsPage from './pages/SettingsPage';
+import { Terminal, Server, LayoutDashboard, Lock, Unlock, Eye, EyeOff, ShieldAlert, Key, Check, Loader2, LogOut, Settings } from 'lucide-react';
 import packageJson from '../package.json';
 import { useAuthStore } from './stores/authStore';
 
@@ -14,6 +15,7 @@ function AppContent() {
   const isOverview = location.pathname === '/' || location.pathname === '/overview';
   const isConnections = location.pathname === '/connections';
   const isTerminal = location.pathname === '/terminal';
+  const isSettings = location.pathname === '/settings';
 
   const navClass = (active: boolean) =>
     `flex items-center gap-2 px-4 py-1.5 my-2 mx-1 text-xs font-semibold tracking-wide rounded-lg transition-all duration-200 cursor-pointer ${
@@ -54,6 +56,10 @@ function AppContent() {
                 <Terminal size={13} />
                 Terminal
               </button>
+              <button onClick={() => navigate('/settings')} className={navClass(isSettings)}>
+                <Settings size={13} />
+                Settings
+              </button>
             </nav>
           </div>
 
@@ -88,6 +94,9 @@ function AppContent() {
         </div>
         <div style={{ display: isTerminal ? 'block' : 'none' }}>
           <TerminalView />
+        </div>
+        <div style={{ display: isSettings ? 'block' : 'none' }}>
+          <SettingsPage />
         </div>
       </main>
     </div>

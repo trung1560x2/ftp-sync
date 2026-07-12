@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { RefreshCw, ArrowLeft, ArrowRight, AlertCircle, CheckCircle, Download, Upload, Folder, Smartphone, Monitor } from 'lucide-react';
 import { FixedSizeList as List } from 'react-window';
 import ContentDiffModal from './ContentDiffModal';
@@ -48,7 +48,7 @@ interface DiffItem {
     name: string;           // Remote name (canonical for Linux operations)
     localName: string | null; // Local name (for Windows file operations)
     isDirectory: boolean;
-    status: 'synchronized' | 'newer_local' | 'newer_remote' | 'missing_local' | 'missing_remote' | 'different_size';
+    status: 'synchronized' | 'newer_local' | 'newer_remote' | 'missing_local' | 'missing_remote' | 'different_size' | 'conflict';
     local: { size: number; modifiedAt: string } | null;
     remote: { size: number; modifiedAt: string } | null;
     containsChanges?: boolean; // Indicates if any sub-item has changes
@@ -86,7 +86,7 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose, i
 
     const [isEditingPath, setIsEditingPath] = useState(false);
     const [tempPath, setTempPath] = useState('');
-    const [contentDiffFile, setContentDiffFile] = useState<{ remotePath: string; fileName: string } | null>(null);
+    const [contentDiffFile, setContentDiffFile] = useState<{ remotePath: string; fileName: string; status?: string } | null>(null);
     const [recursive, setRecursive] = useState(false);
 
     // Queue for accumulating single-file clicks
@@ -116,7 +116,7 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose, i
             }
         } catch (err: unknown) {
             console.error('AI explanation failed', err);
-            const error = err as any;
+            const error = err as Error;
             setCopilotError(error.message || 'LỖI KẾT NỐI VỚI MÁY CHỦ.');
         } finally {
             setCopilotLoading(false);
@@ -150,7 +150,7 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose, i
         };
     }, []);
 
-    const fetchDiff = async (path?: string) => {
+    const fetchDiff = useCallback(async (path?: string) => {
         setLoading(true);
         setFetchError(null);
         try {
@@ -173,17 +173,16 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose, i
             }
         } catch (err: unknown) {
             console.error('Failed to fetch diff', err);
-            const error = err as any;
+            const error = err as Error;
             setFetchError(error.message || 'Unknown error occurred');
         } finally {
             setLoading(false);
         }
-    };
+    }, [connectionId, recursive]);
 
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     useEffect(() => {
         fetchDiff(currentPath || undefined);
-    }, [connectionId, recursive, currentPath]); // Refetch when recursive toggles or path changes
+    }, [fetchDiff, currentPath]); // Refetch when recursive toggles or path changes
 
     useEffect(() => {
         if (!searchQuery) {
@@ -256,6 +255,7 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose, i
             case 'missing_local': return 'text-red-400 bg-red-950/10 border border-red-500/20';
             case 'missing_remote': return 'text-neutral-400 bg-neutral-900/40 border border-neutral-800';
             case 'different_size': return 'text-amber-400 bg-amber-950/10 border border-amber-500/20';
+            case 'conflict': return 'text-red-400 bg-red-950/20 border border-red-500/35';
             default: return 'text-neutral-500 bg-neutral-900/40 border border-neutral-800';
         }
     };
@@ -271,6 +271,7 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose, i
             case 'missing_local': return <div className="flex items-center text-red-400 text-[9px] uppercase font-bold tracking-wider"><Download size={10} className="mr-1" /> Missing Local</div>;
             case 'missing_remote': return <div className="flex items-center text-neutral-400 text-[9px] uppercase font-bold tracking-wider"><Upload size={10} className="mr-1" /> Missing Remote</div>;
             case 'different_size': return <AlertCircle size={11} className="text-amber-500 mr-1.5 flex-shrink-0" />;
+            case 'conflict': return <div className="flex items-center text-red-400 text-[9px] uppercase font-bold tracking-wider animate-pulse"><AlertCircle size={10} className="mr-1 text-red-500" /> Conflict</div>;
             default: return null;
         }
     };
@@ -879,6 +880,7 @@ const VisualDiffModal: React.FC<Props> = ({ connectionId, serverName, onClose, i
                     connectionId={connectionId}
                     remotePath={contentDiffFile.remotePath}
                     fileName={contentDiffFile.fileName}
+                    status={contentDiffFile.status}
                     onClose={() => setContentDiffFile(null)}
                     onSyncComplete={() => fetchDiff(currentPath)}
                 />
