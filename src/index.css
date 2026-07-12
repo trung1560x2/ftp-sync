@@ -8,25 +8,27 @@
   }
   
   body {
-    background-color: #0a0a0a;
-    color: #e5e5e5;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    background-color: #0d0e12;
+    color: #e2e8f0;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
   }
 }
 
-/* Custom minimal sharp scrollbars */
+/* Custom minimal scrollbars */
 ::-webkit-scrollbar {
-  width: 4px;
-  height: 4px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #0f0f0f;
+  background: #0d0e12;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #262626;
-  border-radius: 0px;
+  background: #212635;
+  border-radius: 9999px;
+  border: 1.5px solid #0d0e12;
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -61,5 +63,31 @@
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #f97316;
+}
+
+/* Hide scrollbar for tab bar */
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Terminal container overrides */
+.xterm {
+  padding: 4px;
+}
+.xterm-viewport::-webkit-scrollbar {
+  width: 4px;
+}
+.xterm-viewport::-webkit-scrollbar-track {
+  background: #121212;
+}
+.xterm-viewport::-webkit-scrollbar-thumb {
+  background: #262626;
+}
+.xterm-viewport::-webkit-scrollbar-thumb:hover {
   background: #f97316;
 }

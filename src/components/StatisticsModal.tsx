@@ -236,79 +236,82 @@ const StatisticsModal: React.FC<Props> = ({ connectionId, serverName, onClose })
   }, [stats]);
 
   return (
-    <div className="fixed inset-0 bg-neutral-955/80 backdrop-blur-sm flex items-center justify-center z-[70] p-4">
-      <div className="bg-neutral-900 border border-neutral-850 w-full max-w-5xl h-[85vh] flex flex-col rounded-none text-neutral-200 font-mono">
+    <div className="fixed inset-0 bg-[#0d0e12]/60 backdrop-blur-sm flex items-center justify-center z-[70] p-4">
+      <div className="bg-[#161922]/95 backdrop-blur-md border border-neutral-800/80 w-full max-w-5xl h-[85vh] flex flex-col rounded-2xl text-neutral-200 shadow-2xl overflow-hidden font-sans select-none">
         {/* Header */}
-        <div className="flex justify-between items-center p-4 border-b border-neutral-800 bg-neutral-950">
+        <div className="flex justify-between items-center p-5 border-b border-neutral-800/60 bg-[#0d0e12]/60 shrink-0">
           <div>
-            <h2 className="text-xs font-black text-neutral-100 uppercase tracking-widest flex items-center gap-2">
+            <h2 className="text-sm font-bold font-outfit text-white uppercase tracking-wider flex items-center gap-2">
               <span className="w-1.5 h-3.5 bg-orange-500 block animate-signal"></span>
               Statistics & Diagnostics
             </h2>
             <p className="text-[10px] text-neutral-500 font-mono mt-1 uppercase">Node: {serverName}</p>
           </div>
-          <button onClick={onClose} className="p-1 hover:bg-neutral-800 text-neutral-500 hover:text-neutral-300 transition-colors">
+          <button onClick={onClose} className="p-1.5 hover:bg-neutral-800/80 text-neutral-400 hover:text-white rounded-lg transition-colors">
             <X size={18} />
           </button>
         </div>
 
         {/* Tabs */}
-        <div className="flex border-b border-neutral-800 bg-neutral-950">
+        <div className="flex border-b border-neutral-800/60 bg-[#0d0e12]/40 shrink-0">
           <button
             onClick={() => setActiveTab('charts')}
-            className={`px-6 py-3 font-bold text-xs uppercase tracking-wider transition-colors rounded-none ${
+            className={`px-6 py-3.5 font-semibold text-xs uppercase tracking-wider transition-all duration-150 relative ${
               activeTab === 'charts'
-                ? 'border-b-2 border-orange-500 text-orange-500 bg-neutral-900/20'
-                : 'text-neutral-500 hover:text-neutral-300 hover:bg-neutral-900/50'
+                ? 'text-orange-500 bg-neutral-900/10'
+                : 'text-neutral-500 hover:text-neutral-300 hover:bg-neutral-900/20'
             }`}
           >
             Charts & Overview
+            {activeTab === 'charts' && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-orange-500 rounded-full"></span>}
           </button>
           <button
             onClick={() => setActiveTab('history')}
-            className={`px-6 py-3 font-bold text-xs uppercase tracking-wider transition-colors rounded-none ${
+            className={`px-6 py-3.5 font-semibold text-xs uppercase tracking-wider transition-all duration-150 relative ${
               activeTab === 'history'
-                ? 'border-b-2 border-orange-500 text-orange-500 bg-neutral-900/20'
-                : 'text-neutral-500 hover:text-neutral-300 hover:bg-neutral-900/50'
+                ? 'text-orange-500 bg-neutral-900/10'
+                : 'text-neutral-500 hover:text-neutral-300 hover:bg-neutral-900/20'
             }`}
           >
             Activity & History
+            {activeTab === 'history' && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-orange-500 rounded-full"></span>}
           </button>
           <button
             onClick={() => setActiveTab('logs')}
-            className={`px-6 py-3 font-bold text-xs uppercase tracking-wider transition-colors rounded-none ${
+            className={`px-6 py-3.5 font-semibold text-xs uppercase tracking-wider transition-all duration-150 relative ${
               activeTab === 'logs'
-                ? 'border-b-2 border-orange-500 text-orange-500 bg-neutral-900/20'
-                : 'text-neutral-500 hover:text-neutral-300 hover:bg-neutral-900/50'
+                ? 'text-orange-500 bg-neutral-900/10'
+                : 'text-neutral-500 hover:text-neutral-300 hover:bg-neutral-900/20'
             }`}
           >
             Full Log History
+            {activeTab === 'logs' && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-orange-500 rounded-full"></span>}
           </button>
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto p-6 bg-neutral-900/40 custom-scrollbar">
+        <div className="flex-1 overflow-y-auto p-6 bg-neutral-900/20 custom-scrollbar">
           {activeTab === 'charts' && (
             <div className="h-full flex flex-col space-y-6">
               {/* Summary Cards */}
-              <div className="grid grid-cols-2 gap-4">
-                <div className="bg-neutral-950 p-4 border border-neutral-850 rounded-none">
-                  <h3 className="text-[9px] font-bold text-neutral-500 uppercase tracking-widest">Total Uploaded</h3>
-                  <p className="text-xl font-bold text-orange-500 mt-1 font-mono">
+              <div className="grid grid-cols-2 gap-6">
+                <div className="bg-[#0d0e12]/60 p-4.5 border border-neutral-800/60 rounded-xl hover:border-amber-500/20 transition-all duration-300">
+                  <h3 className="text-[10px] font-mono uppercase text-neutral-500 tracking-wider">Total Uploaded</h3>
+                  <p className="text-2xl font-extrabold font-outfit text-orange-500 mt-1">
                     {formatBytes(stats?.totalStats?.total_uploaded || 0)}
                   </p>
                 </div>
-                <div className="bg-neutral-950 p-4 border border-neutral-850 rounded-none">
-                  <h3 className="text-[9px] font-bold text-neutral-500 uppercase tracking-widest">Total Downloaded</h3>
-                  <p className="text-xl font-bold text-emerald-500 mt-1 font-mono">
+                <div className="bg-[#0d0e12]/60 p-4.5 border border-neutral-800/60 rounded-xl hover:border-amber-500/20 transition-all duration-300">
+                  <h3 className="text-[10px] font-mono uppercase text-neutral-500 tracking-wider">Total Downloaded</h3>
+                  <p className="text-2xl font-extrabold font-outfit text-emerald-500 mt-1">
                     {formatBytes(stats?.totalStats?.total_downloaded || 0)}
                   </p>
                 </div>
               </div>
 
               {/* Chart */}
-              <div className="flex-1 bg-neutral-950 p-4 border border-neutral-850 rounded-none min-h-[300px] flex flex-col">
-                <h3 className="text-xs font-bold text-neutral-300 mb-4 uppercase tracking-widest">Daily Data Transfer (Last 7 Days)</h3>
+              <div className="flex-1 bg-[#0d0e12]/60 p-5 border border-neutral-800/60 rounded-xl min-h-[300px] flex flex-col">
+                <h3 className="text-xs font-semibold font-outfit text-white mb-4 uppercase tracking-widest">Daily Data Transfer (Last 7 Days)</h3>
                 <div className="flex-1 min-h-[220px]">
                   {loading ? (
                     <div className="flex justify-center items-center h-full">
@@ -317,20 +320,30 @@ const StatisticsModal: React.FC<Props> = ({ connectionId, serverName, onClose })
                   ) : chartData.length > 0 ? (
                     <ResponsiveContainer width="100%" height="100%">
                       <RechartsBarChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1f1f1f" />
-                        <XAxis dataKey="date" stroke="#525252" fontSize={9} />
-                        <YAxis tickFormatter={(value) => formatBytes(value)} stroke="#525252" fontSize={9} width={65} />
+                        <defs>
+                          <linearGradient id="modalBarUpload" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#ea580c" stopOpacity={0.9} />
+                            <stop offset="95%" stopColor="#ea580c" stopOpacity={0.3} />
+                          </linearGradient>
+                          <linearGradient id="modalBarDownload" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#059669" stopOpacity={0.9} />
+                            <stop offset="95%" stopColor="#059669" stopOpacity={0.3} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1f1f1f" opacity={0.3} />
+                        <XAxis dataKey="date" stroke="#525252" fontSize={9} fontFamily="Courier New" />
+                        <YAxis tickFormatter={(value) => formatBytes(value)} stroke="#525252" fontSize={9} width={65} fontFamily="Courier New" />
                         <Tooltip 
                           formatter={(value: number) => formatBytes(value)} 
-                          contentStyle={{ backgroundColor: '#0a0a0a', borderColor: '#262626', color: '#e5e5e5', fontSize: 10, fontFamily: 'monospace' }}
+                          contentStyle={{ backgroundColor: '#0a0a0c', borderColor: '#262626', color: '#e5e5e5', fontSize: 10, fontFamily: 'monospace' }}
                         />
                         <Legend wrapperStyle={{ fontSize: 10, paddingTop: 10 }} />
-                        <Bar dataKey="upload" name="Upload" fill="#ea580c" radius={0} />
-                        <Bar dataKey="download" name="Download" fill="#059669" radius={0} />
+                        <Bar dataKey="upload" name="Upload" fill="url(#modalBarUpload)" radius={[3, 3, 0, 0]} />
+                        <Bar dataKey="download" name="Download" fill="url(#modalBarDownload)" radius={[3, 3, 0, 0]} />
                       </RechartsBarChart>
                     </ResponsiveContainer>
                   ) : (
-                    <div className="flex justify-center items-center h-full text-neutral-600 text-xs uppercase">
+                    <div className="flex justify-center items-center h-full text-neutral-600 text-xs uppercase font-mono">
                       No transfer data available yet
                     </div>
                   )}
@@ -342,19 +355,21 @@ const StatisticsModal: React.FC<Props> = ({ connectionId, serverName, onClose })
           {activeTab === 'history' && (
             <div className="space-y-6">
               {/* Heatmap Grid */}
-              <HeatmapGrid data={heatmapData} loading={heatmapLoading} />
+              <div className="bg-[#0d0e12]/60 border border-neutral-800/60 rounded-xl p-5">
+                <HeatmapGrid data={heatmapData} loading={heatmapLoading} />
+              </div>
 
               {/* Sync Sessions / Commits */}
-              <div className="bg-neutral-950 border border-neutral-850 p-4">
-                <div className="flex justify-between items-center mb-4 pb-2 border-b border-neutral-900">
-                  <span className="text-[10px] font-black text-neutral-450 tracking-widest uppercase flex items-center gap-1.5">
+              <div className="bg-[#0d0e12]/60 border border-neutral-800/60 rounded-xl p-5">
+                <div className="flex justify-between items-center mb-4 pb-2 border-b border-neutral-800/40">
+                  <span className="text-xs font-semibold font-outfit text-neutral-300 uppercase flex items-center gap-1.5">
                     <Calendar size={12} className="text-orange-500" />
                     Sync Sessions Log History // Commits
                   </span>
                   {sessions.length > 0 && (
                     <button
                       onClick={handleClearSessions}
-                      className="text-neutral-500 hover:text-red-500 flex items-center bg-neutral-900 px-2 py-1 border border-neutral-800 text-[9px] font-bold uppercase transition-colors"
+                      className="text-neutral-400 hover:text-rose-400 flex items-center bg-neutral-950 border border-neutral-800 hover:border-rose-950/60 px-2.5 py-1 text-[10px] font-mono uppercase transition-all duration-150 rounded-lg"
                       title="Clear History"
                     >
                       <Trash2 size={10} className="mr-1" />
@@ -365,7 +380,7 @@ const StatisticsModal: React.FC<Props> = ({ connectionId, serverName, onClose })
 
                 <div className="space-y-3">
                   {sessionsLoading && sessions.length === 0 ? (
-                    <div className="py-8 text-center text-neutral-600 text-xs uppercase animate-pulse">
+                    <div className="py-8 text-center text-neutral-600 text-xs uppercase animate-pulse font-mono">
                       Loading sync commits...
                     </div>
                   ) : sessions.length > 0 ? (
@@ -376,23 +391,23 @@ const StatisticsModal: React.FC<Props> = ({ connectionId, serverName, onClose })
                       const skippedCount = session.files.filter((f: SyncSessionFile) => f.status === 'skipped').length;
 
                       return (
-                        <div key={session.id} className="border border-neutral-850 bg-neutral-900/20 font-mono">
+                        <div key={session.id} className="border border-neutral-800/60 bg-neutral-900/10 rounded-xl overflow-hidden mb-3 hover:border-neutral-700/60 transition-all duration-150">
                           {/* Session Header (Commit Line) */}
                           <div 
                             onClick={() => setExpandedSessions(prev => ({ ...prev, [session.id]: !isExpanded }))}
-                            className="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between cursor-pointer hover:bg-neutral-900/50 transition-colors gap-2"
+                            className="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between cursor-pointer hover:bg-neutral-900/30 transition-colors gap-2"
                           >
                             <div className="flex items-center space-x-3 min-w-0">
-                              <span className={`w-2 h-2 rounded-none flex-shrink-0 ${
+                              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
                                 session.status === 'success' ? 'bg-emerald-500' : 'bg-red-500 animate-pulse'
                               }`} />
                               
-                              <div className="flex items-center space-x-1 text-neutral-500 text-[10px] font-bold flex-shrink-0">
+                              <div className="flex items-center space-x-1 text-neutral-500 text-[10px] font-bold font-mono flex-shrink-0">
                                 <GitCommit size={12} className="text-orange-500/80" />
-                                <span>{session.id}</span>
+                                <span>{session.id.substring(0, 8)}</span>
                               </div>
                               
-                              <span className="text-xs font-bold text-neutral-200 truncate">
+                              <span className="text-xs font-semibold text-neutral-200 truncate font-sans">
                                 {session.status === 'success' 
                                   ? `Synced ${successCount} files successfully`
                                   : `Failed sync session (${failedCount} errors)`
@@ -401,9 +416,9 @@ const StatisticsModal: React.FC<Props> = ({ connectionId, serverName, onClose })
                               </span>
                             </div>
 
-                            <div className="flex items-center justify-between sm:justify-end space-x-4 text-neutral-500 text-[10px] font-bold">
+                            <div className="flex items-center justify-between sm:justify-end space-x-4 text-neutral-500 text-[10px] font-bold font-mono">
                               <span>{new Date(session.timestamp).toLocaleString()}</span>
-                              <span className="bg-neutral-900 border border-neutral-800 px-1.5 py-0.5 text-neutral-400">
+                              <span className="bg-neutral-950 border border-neutral-850/80 px-2 py-0.5 text-neutral-400 rounded-md">
                                 {(session.duration / 1000).toFixed(1)}s
                               </span>
                               {isExpanded ? <ChevronUp size={14} className="text-neutral-400" /> : <ChevronDown size={14} className="text-neutral-400" />}
@@ -412,9 +427,9 @@ const StatisticsModal: React.FC<Props> = ({ connectionId, serverName, onClose })
 
                           {/* Session Files Details */}
                           {isExpanded && (
-                            <div className="border-t border-neutral-900 bg-neutral-950/70 p-3">
+                            <div className="border-t border-neutral-850 bg-neutral-950/40 p-4">
                               <div className="overflow-x-auto">
-                                <table className="w-full text-left text-xs border-collapse">
+                                <table className="w-full text-left text-xs border-collapse font-mono">
                                   <thead className="text-[10px] text-neutral-500 uppercase bg-neutral-900/40 border-b border-neutral-900 sticky top-0">
                                     <tr>
                                       <th className="px-3 py-2 font-bold">Action</th>
@@ -428,18 +443,18 @@ const StatisticsModal: React.FC<Props> = ({ connectionId, serverName, onClose })
                                     {session.files.map((file: SyncSessionFile, fileIdx: number) => (
                                       <tr key={fileIdx} className="hover:bg-neutral-900/30 transition-colors">
                                         <td className="px-3 py-2 font-bold whitespace-nowrap">
-                                          <span className="flex items-center space-x-1.5">
+                                          <span className="flex items-center space-x-1.5 text-[9px] tracking-wider">
                                             {file.direction === 'upload' && <ArrowUpRight size={12} className="text-orange-500" />}
                                             {file.direction === 'download' && <ArrowDownLeft size={12} className="text-emerald-500" />}
                                             {file.direction === 'delete' && <Trash2 size={12} className="text-red-400" />}
-                                            <span className="uppercase text-[9px] tracking-wider">{file.direction}</span>
+                                            <span className="uppercase">{file.direction}</span>
                                           </span>
                                         </td>
-                                        <td className="px-3 py-2 text-neutral-300 break-all select-all font-mono">{file.path}</td>
+                                        <td className="px-3 py-2 text-neutral-300 break-all select-all">{file.path}</td>
                                         <td className="px-3 py-2 text-neutral-400 whitespace-nowrap">{formatBytes(file.size)}</td>
                                         <td className="px-3 py-2 whitespace-nowrap">
-                                          <span className={`px-1.5 py-0.5 text-[9px] font-bold uppercase rounded-[1px] ${
-                                            file.status === 'success' ? 'bg-emerald-950/20 text-emerald-450 border border-emerald-900/30' :
+                                          <span className={`px-2 py-0.5 text-[9px] font-bold uppercase rounded-full ${
+                                            file.status === 'success' ? 'bg-emerald-950/20 text-emerald-400 border border-emerald-900/30' :
                                             file.status === 'skipped' ? 'bg-neutral-900 text-neutral-500 border border-neutral-800' :
                                             'bg-red-950/20 text-red-400 border border-red-900/30 animate-pulse'
                                           }`} title={file.message}>
@@ -463,7 +478,7 @@ const StatisticsModal: React.FC<Props> = ({ connectionId, serverName, onClose })
                                                   }
                                                   setContentDiffFile({ remotePath: file.path, fileName: file.name });
                                                 }}
-                                                className="px-2 py-1 bg-neutral-900 hover:bg-neutral-850 border border-neutral-800 text-neutral-400 hover:text-orange-500 text-[9px] font-bold uppercase flex items-center gap-1 transition-colors"
+                                                className="px-2.5 py-1 bg-neutral-950 hover:bg-neutral-900 border border-neutral-800 hover:border-neutral-700 text-neutral-400 hover:text-orange-400 text-[10px] font-mono uppercase flex items-center gap-1 rounded-md transition-all duration-150"
                                               >
                                                 <GitCompare size={10} />
                                                 Diff Live
@@ -471,7 +486,7 @@ const StatisticsModal: React.FC<Props> = ({ connectionId, serverName, onClose })
                                               <button
                                                 onClick={() => handleRestore(session.id, file.path)}
                                                 disabled={restoringFile === file.path}
-                                                className="px-2 py-1 bg-orange-950/20 hover:bg-orange-900/30 border border-orange-900/40 text-orange-400 hover:text-orange-300 text-[9px] font-bold uppercase flex items-center gap-1 transition-colors disabled:opacity-50"
+                                                className="px-2.5 py-1 bg-orange-950/20 hover:bg-orange-900/30 border border-orange-900/40 text-orange-400 hover:text-orange-300 text-[10px] font-mono uppercase flex items-center gap-1 rounded-md transition-all duration-150 disabled:opacity-50"
                                               >
                                                 {restoringFile === file.path ? (
                                                   <RefreshCw size={10} className="animate-spin" />
@@ -494,7 +509,7 @@ const StatisticsModal: React.FC<Props> = ({ connectionId, serverName, onClose })
                       );
                     })
                   ) : (
-                    <div className="py-12 text-center text-neutral-600 text-xs uppercase border border-dashed border-neutral-900">
+                    <div className="py-12 text-center text-neutral-600 text-xs uppercase border border-dashed border-neutral-900 font-mono">
                       No sync commits recorded yet. Run a sync to populate history.
                     </div>
                   )}
@@ -504,32 +519,32 @@ const StatisticsModal: React.FC<Props> = ({ connectionId, serverName, onClose })
           )}
 
           {activeTab === 'logs' && (
-            <div className="h-full bg-neutral-950 border border-neutral-850 flex flex-col rounded-none">
-              <div className="p-3 border-b border-neutral-850 flex justify-between items-center bg-neutral-950/80">
+            <div className="h-full bg-[#0d0e12]/60 border border-neutral-800/60 flex flex-col rounded-xl overflow-hidden">
+              <div className="p-3.5 border-b border-neutral-800/60 flex justify-between items-center bg-[#0d0e12]/80 shrink-0">
                 <h3 className="font-bold text-xs text-neutral-400 uppercase tracking-wider">System Logs (Last 200)</h3>
-                <button onClick={fetchLogs} className="p-1 hover:bg-neutral-800 border border-neutral-850 text-neutral-400 hover:text-neutral-200 transition-colors">
+                <button onClick={fetchLogs} className="p-1.5 hover:bg-neutral-800 border border-neutral-800 text-neutral-400 hover:text-neutral-200 rounded-lg transition-colors">
                   <RefreshCw size={14} />
                 </button>
               </div>
-              <div className="flex-1 overflow-y-auto custom-scrollbar">
-                <table className="w-full text-xs text-left font-mono border-collapse">
-                  <thead className="text-[10px] text-neutral-500 uppercase bg-neutral-900 border-b border-neutral-800 sticky top-0">
+              <div className="flex-1 overflow-y-auto custom-scrollbar font-mono text-xs">
+                <table className="w-full text-left border-collapse">
+                  <thead className="text-[10px] text-neutral-500 uppercase bg-neutral-900 border-b border-neutral-850 sticky top-0">
                     <tr>
                       <th className="px-4 py-2.5">Time</th>
                       <th className="px-4 py-2.5">Type</th>
                       <th className="px-4 py-2.5">Message</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-neutral-900/60">
+                  <tbody className="divide-y divide-neutral-900/40">
                     {logs.map((log) => (
                       <tr key={log.id} className="hover:bg-neutral-900/40 transition-colors">
                         <td className="px-4 py-3 text-neutral-500 whitespace-nowrap">
                           {new Date(log.created_at).toLocaleString()}
                         </td>
                         <td className="px-4 py-3 whitespace-nowrap">
-                          <span className={`px-2 py-0.5 border text-[10px] font-bold rounded-none ${
+                          <span className={`px-2.5 py-0.5 border text-[10px] font-bold rounded-full ${
                             log.type === 'error' ? 'bg-red-950/30 text-red-400 border-red-900/40' :
-                            log.type === 'success' ? 'bg-emerald-950/30 text-emerald-400 border-emerald-900/40' :
+                            log.type === 'success' ? 'bg-emerald-950/30 text-emerald-450 border-emerald-900/40' :
                             'bg-neutral-900 text-neutral-400 border-neutral-800'
                           }`}>
                             {log.type.toUpperCase()}

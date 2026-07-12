@@ -45,3 +45,16 @@ debug_*.js
 .env
 
 dist-server/
+
+# Rust builds & scanner binaries
+api/scanner/target/
+bin/local_scanner
+bin/local_scanner.exe
+
+# SQLite temporary files
+*.sqlite-shm
+*.sqlite-wal
+
+# Debug scripts and scratch files archive
+scripts/debug/
+

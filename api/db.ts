@@ -18,6 +18,10 @@ export const initDb = async () => {
       filename: dbPath,
       driver: sqlite3.Database
     });
+    
+    // Enable WAL mode and synchronous optimizations for high concurrency
+    await db.exec('PRAGMA journal_mode = WAL;');
+    await db.exec('PRAGMA synchronous = NORMAL;');
   } catch (err: any) {
     console.error('Failed to open database:', err);
     // Fallback to memory db if file access fails, just to keep app running (though data wont persist)
@@ -88,6 +92,34 @@ export const initDb = async () => {
     CREATE INDEX IF NOT EXISTS idx_local_file_cache_conn ON local_file_cache(connection_id);
     CREATE INDEX IF NOT EXISTS idx_sync_transfer_queue_conn ON sync_transfer_queue(connection_id);
     CREATE INDEX IF NOT EXISTS idx_sync_transfer_queue_status ON sync_transfer_queue(status);
+
+    CREATE TABLE IF NOT EXISTS command_snippets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      connection_id INTEGER,
+      name TEXT NOT NULL,
+      command TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      tags TEXT DEFAULT '',
+      use_count INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS port_forwards (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      connection_id INTEGER NOT NULL,
+      type TEXT NOT NULL DEFAULT 'local',
+      local_host TEXT DEFAULT '127.0.0.1',
+      local_port INTEGER NOT NULL,
+      remote_host TEXT DEFAULT '127.0.0.1',
+      remote_port INTEGER NOT NULL,
+      description TEXT DEFAULT '',
+      auto_start INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_command_snippets_conn ON command_snippets(connection_id);
+    CREATE INDEX IF NOT EXISTS idx_port_forwards_conn ON port_forwards(connection_id);
   `);
 
   // Recovery: Mark all 'syncing' or 'pending' files from previous crash as 'interrupted'
@@ -185,6 +217,16 @@ export const initDb = async () => {
 
   try {
     await db.exec("ALTER TABLE ftp_connections ADD COLUMN backup_path TEXT");
+  } catch (e) { /* ignore if exists */ }
+
+  // Migration: ensure command_snippets columns exist (for older DBs)
+  try {
+    await db.exec("ALTER TABLE command_snippets ADD COLUMN use_count INTEGER DEFAULT 0");
+  } catch (e) { /* ignore if exists */ }
+
+  // Migration: ensure port_forwards columns exist (for older DBs)
+  try {
+    await db.exec("ALTER TABLE port_forwards ADD COLUMN auto_start INTEGER DEFAULT 0");
   } catch (e) { /* ignore if exists */ }
 
   console.log('Database initialized successfully');

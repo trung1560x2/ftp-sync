@@ -81,42 +81,42 @@ const ConnectionManager: React.FC = () => {
     <>
       <InterruptedSyncBanner onStateChange={fetchConnections} />
       <div className="container mx-auto px-4 py-8 max-w-6xl">
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4 border-b border-neutral-800 pb-6">
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4 border-b border-neutral-850 pb-6">
           <div>
-            <h1 className="text-xl font-black text-neutral-100 uppercase tracking-widest flex items-center gap-2">
-              <span className="w-2.5 h-4 bg-orange-500 block"></span>
+            <h1 className="text-2xl font-extrabold text-neutral-150 font-display flex items-center gap-3">
+              <span className="w-1.5 h-6 bg-gradient-to-b from-orange-500 to-amber-500 rounded-full block"></span>
               Server Connections
             </h1>
-          <p className="text-xs text-neutral-500 font-mono mt-1">Connection Pool // Total: {connections.length}</p>
-        </div>
-
-        <div className="flex items-center space-x-3 w-full md:w-auto font-mono">
-          <div className="relative flex-1 md:w-60">
-            <input
-              type="text"
-              placeholder="Search connections..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full px-3 py-2 bg-neutral-900 border border-neutral-800 rounded-none focus:outline-none focus:border-orange-500 text-xs text-neutral-200 placeholder-neutral-600"
-            />
+            <p className="text-xs text-neutral-500 font-mono mt-1.5">Connection Pool // Active Nodes: {connections.length}</p>
           </div>
-          <button
-            onClick={() => setShowBackup(true)}
-            className="flex items-center px-3.5 py-2 border border-neutral-800 text-neutral-400 rounded-none bg-neutral-900/40 hover:bg-neutral-900 hover:text-neutral-100 hover:border-neutral-700 transition-colors text-xs whitespace-nowrap uppercase"
-            title="Backup & Restore Configurations"
-          >
-            <Shield size={14} className="mr-1.5 text-neutral-500" />
-            Backup
-          </button>
-          <button
-            onClick={handleCreate}
-            className="flex items-center px-4 py-2 bg-orange-600 hover:bg-orange-500 text-black font-bold rounded-none border border-orange-700 hover:border-orange-600 transition-colors text-xs whitespace-nowrap uppercase"
-          >
-            <Plus size={14} className="mr-1.5 stroke-[3]" />
-            New Connection
-          </button>
+
+          <div className="flex items-center space-x-3 w-full md:w-auto font-mono">
+            <div className="relative flex-1 md:w-60">
+              <input
+                type="text"
+                placeholder="Search connections..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full px-3 py-2 bg-[#161922]/40 border border-neutral-800/50 rounded-lg focus:outline-none focus:border-orange-500/80 focus:ring-1 focus:ring-orange-500/30 text-xs text-neutral-200 placeholder-neutral-600 transition-all"
+              />
+            </div>
+            <button
+              onClick={() => setShowBackup(true)}
+              className="flex items-center px-4 py-2 border border-neutral-800/60 text-neutral-400 rounded-lg bg-[#161922]/40 hover:bg-[#161922] hover:text-neutral-100 hover:border-neutral-700 transition-all text-xs whitespace-nowrap uppercase cursor-pointer"
+              title="Backup & Restore Configurations"
+            >
+              <Shield size={14} className="mr-1.5 text-neutral-500" />
+              Backup
+            </button>
+            <button
+              onClick={handleCreate}
+              className="flex items-center px-4 py-2 bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-500 hover:to-amber-500 text-white font-bold rounded-lg shadow-lg shadow-orange-600/10 hover:shadow-orange-500/20 transition-all text-xs whitespace-nowrap uppercase cursor-pointer"
+            >
+              <Plus size={14} className="mr-1.5 stroke-[3]" />
+              New Connection
+            </button>
+          </div>
         </div>
-      </div>
 
       {showForm && (
         <div className="fixed inset-0 bg-neutral-950/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">

@@ -453,12 +453,12 @@ const FileManager: React.FC<Props> = ({ connectionId, serverName, onClose }) => 
   };
 
   return (
-    <div className="fixed inset-0 bg-neutral-950/80 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className="bg-neutral-900 border border-neutral-850 w-full max-w-5xl h-[80vh] flex flex-col rounded-none text-neutral-200 font-mono">
+    <div className="fixed inset-0 bg-[#0d0e12]/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className="bg-[#161922]/95 backdrop-blur-md border border-neutral-800/80 w-full max-w-5xl h-[80vh] flex flex-col rounded-2xl text-neutral-200 font-sans shadow-2xl overflow-hidden select-none">
         {/* Header */}
-        <div className="flex justify-between items-center p-4 border-b border-neutral-800 bg-neutral-950">
+        <div className="flex justify-between items-center p-5 border-b border-neutral-800/60 bg-[#0d0e12]/60 shrink-0">
           <div>
-            <h2 className="text-xs font-black text-neutral-100 uppercase tracking-widest flex items-center gap-2">
+            <h2 className="text-sm font-bold font-outfit text-white uppercase tracking-wider flex items-center gap-2">
               <span className="w-1.5 h-3.5 bg-orange-500 block animate-signal"></span>
               File Explorer
             </h2>
@@ -466,26 +466,26 @@ const FileManager: React.FC<Props> = ({ connectionId, serverName, onClose }) => 
           </div>
           <div className="flex items-center space-x-2">
              <button 
-               onClick={handleSyncNow}
-               disabled={syncing}
-               className={`flex items-center px-3 py-1.5 bg-neutral-950 hover:bg-neutral-850 border border-neutral-800 text-emerald-500 text-xs font-bold rounded-none uppercase transition-colors ${syncing ? 'opacity-70 cursor-wait' : ''}`}
+                onClick={handleSyncNow}
+                disabled={syncing}
+                className={`flex items-center px-4 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/25 text-emerald-400 text-xs font-semibold rounded-lg uppercase transition-all duration-150 ${syncing ? 'opacity-70 cursor-wait' : ''}`}
              >
                <Play size={12} className="mr-2 fill-current" />
                {syncing ? 'Sync_Active...' : 'Sync Now'}
              </button>
-             <button onClick={onClose} className="p-1 hover:bg-neutral-800 text-neutral-500 hover:text-neutral-300 transition-colors">
+             <button onClick={onClose} className="p-1.5 hover:bg-neutral-850 text-neutral-400 hover:text-white rounded-lg transition-colors">
                <X size={18} />
              </button>
           </div>
         </div>
 
         {/* Content */}
-        <div className="flex-1 flex overflow-hidden">
+        <div className="flex-1 flex overflow-hidden bg-neutral-900/10">
           
           {/* FTP Remote Panel */}
           <div 
-            className={`flex-1 flex flex-col border-r border-neutral-800 transition-all duration-300 relative ${
-              dragOverRemote ? 'bg-orange-950/15 border-orange-500/30' : ''
+            className={`flex-1 flex flex-col border-r border-neutral-800/60 transition-all duration-300 relative ${
+              dragOverRemote ? 'bg-orange-500/5' : ''
             }`}
             onDragOver={(e) => {
                e.preventDefault();
@@ -506,34 +506,37 @@ const FileManager: React.FC<Props> = ({ connectionId, serverName, onClose }) => 
                 <span className="text-[10px] text-orange-600 mt-1 uppercase font-mono">NODE: {currentRemotePath}</span>
               </div>
             )}
-            <div className="p-3 bg-neutral-950 border-b border-neutral-800 flex justify-between items-center">
-              <h3 className="font-bold text-[10px] uppercase tracking-wider text-neutral-300 flex items-center">
-                <ServerIcon className="w-3.5 h-3.5 mr-2" /> Remote FTP
+            <div className="p-3 bg-[#0d0e12]/40 border-b border-neutral-800/60 flex justify-between items-center shrink-0">
+              <h3 className="font-semibold font-outfit text-xs uppercase tracking-wider text-neutral-300 flex items-center">
+                <ServerIcon className="w-3.5 h-3.5 mr-2 text-amber-500" /> Remote FTP
               </h3>
-              <button onClick={() => fetchRemoteFiles(currentRemotePath)} className="p-1 hover:bg-neutral-850 border border-neutral-800 text-neutral-450 hover:text-neutral-200 transition-colors rounded-none">
+              <button onClick={() => fetchRemoteFiles(currentRemotePath)} className="p-1.5 hover:bg-neutral-800 border border-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors rounded-md shrink-0">
                 <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
               </button>
             </div>
             
             {/* Breadcrumb / Path */}
-            <div className="px-3 py-2 bg-neutral-900/60 border-b border-neutral-850 text-xs text-neutral-400 flex items-center">
+            <div className="px-3 py-2 bg-[#0d0e12]/20 border-b border-neutral-800/60 text-xs text-neutral-400 flex items-center shrink-0">
               <button 
                 onClick={() => {
                    const parent = currentRemotePath.split('/').slice(0, -1).join('/') || '/';
                    fetchRemoteFiles(parent);
                 }}
                 disabled={currentRemotePath === '/' || loading}
-                className="mr-2 p-1 hover:bg-neutral-850 border border-neutral-800 text-neutral-400 disabled:opacity-30 rounded-none"
+                className="mr-2 p-1.5 hover:bg-neutral-800 border border-neutral-800 text-neutral-400 disabled:opacity-30 rounded-md shrink-0 transition-colors"
               >
                 <ArrowLeft size={12} />
               </button>
-              <span className="truncate font-mono text-[11px] uppercase">// {currentRemotePath}</span>
+              <span className="truncate font-mono text-[11px] uppercase text-neutral-300">// {currentRemotePath}</span>
             </div>
 
             {/* File List */}
-            <div className="flex-1 overflow-y-auto p-2 bg-neutral-950/10 custom-scrollbar">
+            <div className="flex-1 overflow-y-auto p-3 bg-[#0d0e12]/10 custom-scrollbar space-y-1">
               {loading ? (
-                <div className="flex justify-center items-center h-full text-neutral-600 text-xs uppercase">LOADING_REMOTE_FILES...</div>
+                <div className="flex flex-col justify-center items-center h-full text-neutral-500 text-xs uppercase font-mono tracking-wider">
+                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-amber-500 mb-2"></div>
+                  LOADING_REMOTE_FILES...
+                </div>
               ) : (
                 <ul className="space-y-1">
                   {remoteFiles.map((file, i) => (
@@ -547,17 +550,17 @@ const FileManager: React.FC<Props> = ({ connectionId, serverName, onClose }) => 
                             file
                           }));
                         }}
-                        className={`w-full flex items-center p-2 rounded-none hover:bg-neutral-850/40 text-left group border border-transparent hover:border-neutral-800 hover:cursor-grab active:cursor-grabbing transition-all ${
+                        className={`w-full flex items-center p-2.5 rounded-xl hover:bg-[#161922]/50 hover:border-neutral-800/40 border border-transparent text-left group hover:cursor-grab active:cursor-grabbing transition-all duration-150 ${
                           !file.isDirectory ? 'cursor-default' : ''
                         }`}
                       >
                         {file.isDirectory ? (
-                          <Folder size={14} className="text-orange-500 mr-3 flex-shrink-0" />
+                          <Folder size={14} className="text-amber-500 mr-3 flex-shrink-0" />
                         ) : (
-                          <FileIcon size={14} className="text-neutral-600 mr-3 flex-shrink-0" />
+                          <FileIcon size={14} className="text-neutral-500 mr-3 flex-shrink-0" />
                         )}
                         <div className="flex-1 min-w-0">
-                          <div className="truncate text-xs font-bold text-neutral-300 group-hover:text-orange-400 transition-colors uppercase">
+                          <div className="truncate text-xs font-semibold text-neutral-200 group-hover:text-orange-400 transition-colors uppercase">
                             {file.name}
                           </div>
                           <div className="text-[10px] text-neutral-500 font-mono mt-0.5">
@@ -567,7 +570,7 @@ const FileManager: React.FC<Props> = ({ connectionId, serverName, onClose }) => 
                         {!file.isDirectory && (
                           <button 
                             onClick={(e) => { e.stopPropagation(); handleManualDownload(file); }}
-                            className="p-1 border border-neutral-800 bg-neutral-950 text-neutral-450 hover:text-orange-500 hover:bg-neutral-900 rounded-none opacity-0 group-hover:opacity-100 transition-all"
+                            className="p-1.5 border border-neutral-850 bg-neutral-950 text-neutral-400 hover:text-orange-400 hover:bg-neutral-900 rounded-md opacity-0 group-hover:opacity-100 transition-all duration-150 shrink-0"
                             title="Download to Local"
                           >
                             <Download size={14} />
@@ -577,7 +580,7 @@ const FileManager: React.FC<Props> = ({ connectionId, serverName, onClose }) => 
                     </li>
                   ))}
                   {remoteFiles.length === 0 && (
-                     <div className="text-center py-10 text-neutral-600 text-xs uppercase font-bold">DIRECTORY_EMPTY</div>
+                     <div className="text-center py-12 text-neutral-500 text-xs uppercase font-mono tracking-wider">DIRECTORY_EMPTY</div>
                   )}
                 </ul>
               )}
@@ -587,7 +590,7 @@ const FileManager: React.FC<Props> = ({ connectionId, serverName, onClose }) => 
           {/* Local Sync Panel */}
           <div 
             className={`flex-1 flex flex-col bg-neutral-900/10 transition-all duration-300 relative ${
-              dragOverLocal ? 'bg-orange-950/15 border-orange-500/30' : ''
+              dragOverLocal ? 'bg-orange-500/5' : ''
             }`}
             onDragOver={(e) => {
                e.preventDefault();
@@ -608,15 +611,15 @@ const FileManager: React.FC<Props> = ({ connectionId, serverName, onClose }) => 
                 <span className="text-[10px] text-orange-600 mt-1 uppercase font-mono">DEST: LOCAL_SYNC_ROOT</span>
               </div>
             )}
-            <div className="p-3 bg-neutral-950 border-b border-neutral-800 flex justify-between items-center shadow-sm z-10">
-               <h3 className="font-bold text-[10px] uppercase tracking-wider text-neutral-300 flex items-center">
-                 <LaptopIcon className="w-3.5 h-3.5 mr-2" /> Local Sync Folder
+            <div className="p-3 bg-[#0d0e12]/40 border-b border-neutral-800/60 flex justify-between items-center shadow-sm z-10 shrink-0">
+               <h3 className="font-semibold font-outfit text-xs uppercase tracking-wider text-neutral-300 flex items-center">
+                 <LaptopIcon className="w-3.5 h-3.5 mr-2 text-amber-500" /> Local Sync Folder
                </h3>
                <div className="flex items-center">
-                  <button onClick={fetchLocalFiles} className="p-1 hover:bg-neutral-850 border border-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors rounded-none mr-2">
+                  <button onClick={fetchLocalFiles} className="p-1.5 hover:bg-neutral-800 border border-neutral-800 text-neutral-400 hover:text-neutral-200 transition-colors rounded-md mr-2 shrink-0">
                     <RefreshCw size={12} />
                   </button>
-                  <label className={`flex items-center px-3 py-1.5 bg-orange-600 hover:bg-orange-500 text-black border border-orange-700 text-xs font-bold rounded-none cursor-pointer uppercase transition-colors ${uploading ? 'opacity-70 pointer-events-none' : ''}`}>
+                  <label className={`flex items-center px-4 py-1.5 bg-orange-600 hover:bg-orange-500 text-neutral-950 text-xs font-bold rounded-lg cursor-pointer uppercase transition-all duration-150 shrink-0 ${uploading ? 'opacity-70 pointer-events-none' : ''}`}>
                     <Upload size={12} className="mr-1.5 stroke-[2.5]" />
                     {uploading ? 'Uploading...' : 'Upload Files'}
                     <input type="file" multiple className="hidden" onChange={handleUpload} />
@@ -624,7 +627,7 @@ const FileManager: React.FC<Props> = ({ connectionId, serverName, onClose }) => 
                </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-2 custom-scrollbar bg-neutral-950/10">
+            <div className="flex-1 overflow-y-auto p-3 custom-scrollbar bg-[#0d0e12]/10 space-y-1">
                <ul className="space-y-1">
                   {localFiles.map((file, i) => (
                     <li 
@@ -636,36 +639,36 @@ const FileManager: React.FC<Props> = ({ connectionId, serverName, onClose }) => 
                           file
                         }));
                       }}
-                      className="flex items-center p-2 rounded-none bg-neutral-950/40 border border-neutral-850/80 hover:border-neutral-800 hover:cursor-grab active:cursor-grabbing group"
+                      className="flex items-center p-2.5 rounded-xl bg-[#161922]/30 border border-neutral-800/40 hover:border-neutral-700/60 hover:bg-[#161922]/60 hover:cursor-grab active:cursor-grabbing group transition-all duration-150 mb-1.5"
                     >
-                        <FileIcon size={14} className="text-neutral-600 mr-3 flex-shrink-0" />
+                        <FileIcon size={14} className="text-neutral-500 mr-3 flex-shrink-0" />
                         <div className="flex-1 min-w-0">
-                          <div className="truncate text-xs font-bold text-neutral-300 uppercase">
+                          <div className="truncate text-xs font-semibold text-neutral-200 uppercase">
                             {file.name}
                           </div>
                           <div className="text-[10px] text-neutral-500 font-mono mt-0.5">
                             {formatSize(file.size)} // {new Date(file.modifiedAt).toLocaleDateString()}
                           </div>
                         </div>
-                        <div className="flex items-center space-x-2.5">
+                        <div className="flex items-center space-x-2.5 shrink-0">
                            <button 
                               onClick={() => handleManualUpload(file)}
-                              className="p-1 text-neutral-500 border border-neutral-800 bg-neutral-950 hover:text-orange-500 rounded-none hover:bg-neutral-900 opacity-0 group-hover:opacity-100 transition-all"
+                              className="p-1.5 text-neutral-400 border border-neutral-850 bg-neutral-950 hover:text-orange-400 hover:bg-neutral-900 rounded-md opacity-0 group-hover:opacity-100 transition-all duration-150"
                               title="Upload to FTP"
                            >
                               <CloudUpload size={14} />
                            </button>
-                           <div className="text-[9px] font-bold text-emerald-400 bg-emerald-950/20 border border-emerald-800/40 px-1.5 py-0.5 rounded-none uppercase">
+                           <div className="text-[9px] font-bold text-emerald-400 bg-emerald-950/20 border border-emerald-800/40 px-2.5 py-0.5 rounded-full uppercase font-mono">
                               Synced
                            </div>
                         </div>
                     </li>
                   ))}
                   {localFiles.length === 0 && (
-                     <div className="text-center py-12 text-neutral-600">
+                     <div className="text-center py-12 text-neutral-500 font-mono">
                         <Upload size={24} className="mx-auto mb-2 opacity-20 text-neutral-400" />
-                        <p className="text-xs uppercase font-bold tracking-wide">No local files detected</p>
-                        <p className="text-[10px] mt-1 text-neutral-600 uppercase font-mono">FILES PLACED IN LOCAL_SYNC WILL SYNC AUTOMATICALLY.</p>
+                        <p className="text-xs uppercase font-bold tracking-wider">No local files detected</p>
+                        <p className="text-[9px] mt-1 text-neutral-600 uppercase font-mono max-w-[250px] mx-auto leading-relaxed">FILES PLACED IN LOCAL_SYNC WILL SYNC AUTOMATICALLY.</p>
                      </div>
                   )}
                </ul>

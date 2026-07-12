@@ -120,7 +120,7 @@ function createWindow() {
     }
 
     tray = new Tray(icon);
-    tray.setToolTip('FTP Sync Manager');
+    tray.setToolTip('OmniSync');
 
     const contextMenu = Menu.buildFromTemplate([
       {

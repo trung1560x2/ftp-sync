@@ -20,6 +20,7 @@ import reportRoutes from './routes/reports.js'
 import deploymentRoutes from './routes/deployment.js'
 import contentDiffRoutes from './routes/contentDiff.js'
 import aiRoutes from './routes/ai.js'
+import terminalRoutes from './routes/terminal.js'
 import { logStore } from './services/LogStore.js'
 
 // for esm mode
@@ -51,6 +52,7 @@ app.use('/api/reports', reportRoutes)
 app.use('/api/deployment', deploymentRoutes)
 app.use('/api/content-diff', contentDiffRoutes)
 app.use('/api/ai', aiRoutes)
+app.use('/api/terminal', terminalRoutes)
 
 /**
  * health
@@ -69,10 +71,11 @@ app.use(
  * error handler middleware
  */
 app.use((error: Error, req: Request, res: Response, _next: NextFunction) => {
+  console.error('[Error Handler] Caught error:', error);
   res.status(500).json({
     success: false,
-    error: 'Server internal error',
-  })
+    error: process.env.NODE_ENV === 'production' ? 'Server internal error' : error.message,
+  });
 })
 
 /**
@@ -89,25 +92,41 @@ app.use((req: Request, res: Response) => {
   }
 })
 
-// Shutdown hooks for emergency log flush
+// Shutdown hooks for emergency log flush + terminal cleanup
+import sshTerminalService from './services/SSHTerminalService.js'
+
 process.on('SIGINT', () => {
-  console.log('SIGINT received. Flushing logs synchronously before exit...');
+  console.log('SIGINT received. Cleaning up...');
   try {
+    sshTerminalService.closeAll();
     logStore.flushSync();
   } catch (e) {
-    console.error('Failed to flush logs on SIGINT', e);
+    console.error('Failed cleanup on SIGINT', e);
   }
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-  console.log('SIGTERM received. Flushing logs synchronously before exit...');
+  console.log('SIGTERM received. Cleaning up...');
   try {
+    sshTerminalService.closeAll();
     logStore.flushSync();
   } catch (e) {
-    console.error('Failed to flush logs on SIGTERM', e);
+    console.error('Failed cleanup on SIGTERM', e);
   }
   process.exit(0);
 });
 
+import { webSocketService } from './services/WebSocketService.js'
+
+// Intercept app.listen to dynamically bootstrap WebSocket server
+const originalListen = app.listen.bind(app);
+app.listen = function (...args: any[]) {
+  const server = originalListen(...args);
+  webSocketService.init(server);
+  return server;
+} as any;
+
 export default app
+
+

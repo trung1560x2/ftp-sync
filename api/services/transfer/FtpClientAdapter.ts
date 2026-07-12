@@ -93,10 +93,11 @@ export class FtpClientAdapter implements TransferClient {
     async checkConnection(): Promise<boolean> {
         if (this.client.closed) return false;
         try {
-            // Race with a 2-second timeout to prevent dead/half-open sockets from hanging the main thread
+            // Probe with a timeout to prevent dead/half-open sockets from hanging the main thread.
+            // High-latency servers can take >2s for a round-trip, so allow 8s.
             const check = this.client.pwd();
-            const timeout = new Promise<never>((_, reject) => 
-                setTimeout(() => reject(new Error('Connection check timeout')), 2000)
+            const timeout = new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('Connection check timeout')), 8000)
             );
             await Promise.race([check, timeout]);
             return true;

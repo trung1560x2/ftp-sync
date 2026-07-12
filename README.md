@@ -2,19 +2,19 @@
 
 Ứng dụng quản lý và đồng bộ hóa FTP mạnh mẽ được xây dựng với Electron, React và TypeScript.
 
-![Version](https://img.shields.io/badge/version-1.0.1-blue)
+![Version](https://img.shields.io/badge/version-1.1.0-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 ## 📥 Download
 
-**Latest Release: v1.0.1**
+**Latest Release: v1.1.0**
 
 | Platform | Download |
 |----------|----------|
-| 🪟 Windows | [FTP-Sync-Manager-Setup-1.0.1.exe](https://github.com/trung1560x2/ftp-sync/releases/latest) |
-| 🐧 Linux | [FTP-Sync-Manager-1.0.1.AppImage](https://github.com/trung1560x2/ftp-sync/releases/latest) |
-| 🍎 macOS | [FTP-Sync-Manager-1.0.1.dmg](https://github.com/trung1560x2/ftp-sync/releases/latest) |
+| 🪟 Windows | [FTP-Sync-Manager-Setup-1.1.0.exe](https://github.com/trung1560x2/ftp-sync/releases/latest) |
+| 🐧 Linux | [FTP-Sync-Manager-1.1.0.AppImage](https://github.com/trung1560x2/ftp-sync/releases/latest) |
+| 🍎 macOS | [FTP-Sync-Manager-1.1.0.dmg](https://github.com/trung1560x2/ftp-sync/releases/latest) |
 
 [📦 View All Releases](https://github.com/trung1560x2/ftp-sync/releases)
 

@@ -5,6 +5,7 @@ import path from 'path';
 import fs from 'fs-extra';
 import { execFile } from 'child_process';
 import util from 'util';
+import { fileURLToPath } from 'url';
 import { getDb } from '../db.js';
 import { decrypt } from '../utils/encryption.js';
 import SyncManager from '../services/SyncService.js';
@@ -12,6 +13,9 @@ import { TransferClientFactory } from '../services/transfer/TransferClientFactor
 import { TransferClient } from '../services/transfer/TransferClient.js';
 
 const execFileAsync = util.promisify(execFile);
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const router = Router();
 
@@ -135,6 +139,9 @@ const scanRemote = async (client: TransferClient, dir: string, base: string, rec
     return results;
   } catch (e: any) {
     console.error(`[Diff] Remote scan failed for ${dir}:`, e.message);
+    // Surface root-level failures to the route so the UI shows the real error
+    // (and the route's retry logic kicks in) instead of a silently empty diff.
+    if (depth === 0) throw e;
     return [];
   }
 };
@@ -149,11 +156,43 @@ const scanLocalRust = async (dir: string, base: string, recursive: boolean, igno
 
     const isWin = process.platform === 'win32';
     const binaryName = isWin ? 'local_scanner.exe' : 'local_scanner';
-    const binaryPath = path.resolve(process.cwd(), 'bin', binaryName);
+    const resourcesPath = (process as any).resourcesPath;
+    let binaryPath = '';
+
+    // 1. Check process.resourcesPath (packaged app with asarUnpack)
+    if (resourcesPath) {
+      const pathsToTry = [
+        path.join(resourcesPath, 'app.asar.unpacked', 'bin', binaryName),
+        path.join(resourcesPath, 'bin', binaryName),
+        path.join(resourcesPath, binaryName)
+      ];
+      for (const p of pathsToTry) {
+        if (fs.existsSync(p)) {
+          binaryPath = p;
+          break;
+        }
+      }
+    }
+
+    // 2. Check dev paths
+    if (!binaryPath) {
+      const devPath1 = path.resolve(__dirname, '..', '..', '..', 'bin', binaryName);
+      if (fs.existsSync(devPath1)) {
+        binaryPath = devPath1;
+      } else {
+        const devPath2 = path.resolve(__dirname, '..', '..', 'bin', binaryName);
+        if (fs.existsSync(devPath2)) {
+          binaryPath = devPath2;
+        } else {
+          // 3. Fallback to process.cwd()
+          binaryPath = path.resolve(process.cwd(), 'bin', binaryName);
+        }
+      }
+    }
 
     // Verify binary exists
-    if (!fs.existsSync(binaryPath)) {
-      throw new Error(`Rust binary not found at ${binaryPath}`);
+    if (!binaryPath || !fs.existsSync(binaryPath)) {
+      throw new Error(`Rust binary not found at resolved paths (last checked: ${binaryPath})`);
     }
 
     // Spawn Rust CLI process
@@ -257,17 +296,23 @@ const scanLocalCached = async (connectionId: number, relativePath: string, isRec
     }
   } else {
     const prefix = normRelPath + '/';
+    // Calculate lexicographical upper bound for range queries
+    const lowerBound = prefix;
+    const upperBound = prefix.substring(0, prefix.length - 1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
+
     if (isRecursive) {
       rows = await db.all(
-        'SELECT * FROM local_file_cache WHERE connection_id = ? AND rel_path LIKE ?',
+        'SELECT * FROM local_file_cache WHERE connection_id = ? AND rel_path >= ? AND rel_path < ?',
         connectionId,
-        prefix + '%'
+        lowerBound,
+        upperBound
       );
     } else {
       rows = await db.all(
-        "SELECT * FROM local_file_cache WHERE connection_id = ? AND rel_path LIKE ? AND rel_path NOT LIKE ?",
+        'SELECT * FROM local_file_cache WHERE connection_id = ? AND rel_path >= ? AND rel_path < ? AND rel_path NOT LIKE ?',
         connectionId,
-        prefix + '%',
+        lowerBound,
+        upperBound,
         prefix + '%/%'
       );
     }
@@ -420,10 +465,6 @@ router.post('/import-local/:id', async (req: Request, res: Response) => {
 });
 
 
-// Helper for robust connection
-const connectClient = async (configOverride?: any) => {
-  // ... logic to connect ...
-}
 
 // Visual Diff (Main Thread Implementation)
 router.get('/diff/:id', async (req: Request, res: Response) => {
@@ -434,10 +475,13 @@ router.get('/diff/:id', async (req: Request, res: Response) => {
   const MAX_ATTEMPTS = 3;
 
   while (attempts < MAX_ATTEMPTS) {
-    let client: TransferClient | null = null; // Unused but kept to avoid modifying the error cleanup
     try {
       attempts++;
       const config = await getConnectionConfig(id);
+      if (!config) {
+        res.status(404).json({ error: 'Connection not found' });
+        return;
+      }
 
       // 1. Determine Paths
       const targetDir = (req.query.path) ? dirPath : (config.target_directory || '/');
@@ -577,9 +621,16 @@ router.get('/diff/:id', async (req: Request, res: Response) => {
     } catch (error: any) {
       console.error(`[Diff Route Error] Attempt ${attempts} failed:`, error.message);
 
-      // Cleanup client inside loop before retrying
-      if (client) {
-        try { client.close(); } catch { }
+
+      // Don't retry on auth/config errors
+      const isAuthError = error.message.includes('decrypt') ||
+        error.message.includes('password') ||
+        error.message.includes('Login') ||
+        error.message.includes('authentication');
+
+      if (isAuthError) {
+        res.status(500).json({ error: 'Cannot connect: Password decryption failed. Please re-enter your FTP password in connection settings.' });
+        return;
       }
 
       // Retry only on connection-related errors

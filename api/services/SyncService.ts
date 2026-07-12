@@ -6,10 +6,16 @@ import PQueue from 'p-queue';
 import { decrypt } from '../utils/encryption.js';
 import { getDb } from '../db.js';
 import { logStore } from './LogStore.js';
-import { shouldIgnore, clearIgnoreCache } from './IgnoreService.js';
+import { shouldIgnore, clearIgnoreCache, getIgnoreInstance } from './IgnoreService.js';
 import { TransferClient } from './transfer/TransferClient.js';
 import { SimpleMutex } from '../utils/SimpleMutex.js';
 import { EventEmitter } from 'events';
+import { execFile } from 'child_process';
+import util from 'util';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 interface SyncLog {
   timestamp: string;
@@ -164,12 +170,6 @@ class SyncSession {
 
     this.connectionPool = [];
 
-    // DEBUG: Log config to understand why local_path is ignored
-    console.log(`[SyncService] Init Connection ${connectionId}`, {
-      local_path: this.config.local_path,
-      id_type: typeof connectionId
-    });
-
     if (this.config.local_path && this.config.local_path.trim() !== '') {
       this.localRoot = this.config.local_path.replace(/^['"]|['"]$/g, '');
     } else {
@@ -228,6 +228,90 @@ class SyncSession {
     }
   }
 
+  private async getLocalScannerBinaryPath(): Promise<string | null> {
+    const isWin = process.platform === 'win32';
+    const binaryName = isWin ? 'local_scanner.exe' : 'local_scanner';
+    const resourcesPath = (process as any).resourcesPath;
+
+    // 1. Check process.resourcesPath (packaged app with asarUnpack)
+    if (resourcesPath) {
+      const pathsToTry = [
+        path.join(resourcesPath, 'app.asar.unpacked', 'bin', binaryName),
+        path.join(resourcesPath, 'bin', binaryName),
+        path.join(resourcesPath, binaryName)
+      ];
+      for (const p of pathsToTry) {
+        if (await fs.pathExists(p)) return p;
+      }
+    }
+
+    // 2. Check relative to compiled output path in dist-server/api/services (3 levels up)
+    const devPath1 = path.resolve(__dirname, '..', '..', '..', 'bin', binaryName);
+    if (await fs.pathExists(devPath1)) return devPath1;
+
+    // 3. Check relative to TS source path in api/services (2 levels up)
+    const devPath2 = path.resolve(__dirname, '..', '..', 'bin', binaryName);
+    if (await fs.pathExists(devPath2)) return devPath2;
+
+    // 4. Fallback to process.cwd()
+    const devPath3 = path.resolve(process.cwd(), 'bin', binaryName);
+    if (await fs.pathExists(devPath3)) return devPath3;
+
+    return null;
+  }
+
+  private async scanLocalNonBlocking(currentDir: string, base: string, ig: any, depth = 0): Promise<any[]> {
+    if (depth > 8) return [];
+    try {
+      if (!fs.existsSync(currentDir)) return [];
+      const entries = await fs.readdir(currentDir, { withFileTypes: true });
+      let results: any[] = [];
+
+      for (const entry of entries) {
+        const fullPath = path.join(currentDir, entry.name);
+        const relPath = path.relative(base, fullPath).replace(/\\/g, '/');
+
+        // Check if ignored BEFORE stat'ing or recursing to avoid entering giant directories
+        if (ig && ig.ignores(relPath)) {
+          continue;
+        }
+
+        // Yield to event loop periodically to keep UI responsive
+        if (results.length > 0 && results.length % 100 === 0) {
+          await new Promise(resolve => setImmediate(resolve));
+        }
+
+        const isDir = entry.isDirectory();
+        let size = 0;
+        let modifiedAt = new Date().toISOString();
+        
+        if (!isDir) {
+          try {
+            const stat = await fs.stat(fullPath);
+            size = stat.size;
+            modifiedAt = stat.mtime.toISOString();
+          } catch (e) {}
+        }
+
+        results.push({
+          relPath,
+          name: entry.name,
+          isDirectory: isDir ? 1 : 0,
+          size,
+          modifiedAt
+        });
+
+        if (isDir) {
+          const subResults = await this.scanLocalNonBlocking(fullPath, base, ig, depth + 1);
+          results = results.concat(subResults);
+        }
+      }
+      return results;
+    } catch (e) {
+      return [];
+    }
+  }
+
   private async indexLocalFiles() {
     this.log('info', 'Starting local file cache indexing...');
     const tStart = Date.now();
@@ -235,64 +319,70 @@ class SyncSession {
       const db = await getDb();
       await db.run('DELETE FROM local_file_cache WHERE connection_id = ?', this.connectionId);
 
-      const filesToIndex: Array<{ relPath: string, name: string, isDirectory: number, size: number, modifiedAt: string }> = [];
+      let filesToIndex: Array<{ relPath: string, name: string, isDirectory: number, size: number, modifiedAt: string }> = [];
+      const ig = await getIgnoreInstance(this.localRoot);
 
-      const scanDir = async (currentDir: string) => {
-        if (!fs.existsSync(currentDir)) return;
-        const entries = await fs.readdir(currentDir, { withFileTypes: true });
-        for (const entry of entries) {
-          const fullPath = path.join(currentDir, entry.name);
-          if (await shouldIgnore(this.localRoot, fullPath)) {
-            continue;
-          }
-          const relPath = path.relative(this.localRoot, fullPath).replace(/\\/g, '/');
-          const isDir = entry.isDirectory();
-          let size = 0;
-          let modifiedAt = new Date().toISOString();
-          try {
-            const stat = await fs.stat(fullPath);
-            size = stat.size;
-            modifiedAt = stat.mtime.toISOString();
-          } catch (e) {
-            // ignore stat errors
-          }
+      // Try Rust scanner first
+      try {
+        const binaryPath = await this.getLocalScannerBinaryPath();
 
-          filesToIndex.push({
-            relPath,
-            name: entry.name,
-            isDirectory: isDir ? 1 : 0,
-            size,
-            modifiedAt
-          });
+        if (binaryPath) {
+          const ignoredFolders = ['.git', 'node_modules', 'vendor', '.idea', '.vscode', 'storage', 'bootstrap/cache', 'dist', 'build', 'coverage'];
+          const ignoredList = ignoredFolders.join(',');
+          const args = ['--path', this.localRoot, '--ignored', ignoredList, '--recursive'];
 
-          if (isDir) {
-            await scanDir(fullPath);
-          }
+          const execFileAsync = util.promisify(execFile);
+          const { stdout } = await execFileAsync(binaryPath, args, { maxBuffer: 20 * 1024 * 1024 });
+          const items = JSON.parse(stdout);
+
+          filesToIndex = items.map((item: any) => ({
+            relPath: item.relPath,
+            name: item.name,
+            isDirectory: item.isDirectory ? 1 : 0,
+            size: item.size,
+            modifiedAt: new Date(item.modifiedAt).toISOString()
+          }));
+        } else {
+          throw new Error('Rust binary not found at any resolved paths');
         }
-      };
+      } catch (err: any) {
+        this.log('info', `Rust local scanner not used, falling back to JS: ${err.message}`);
+        filesToIndex = await this.scanLocalNonBlocking(this.localRoot, this.localRoot, ig);
+      }
 
-      await scanDir(this.localRoot);
+      // Filter files with IgnoreService (final pass for complex ignore rules)
+      if (ig) {
+        filesToIndex = filesToIndex.filter(file => !ig.ignores(file.relPath));
+      }
 
-      // Perform batch insert inside a single transaction for maximum speed
+      // Perform chunked bulk insert for maximum speed and non-blocking operation
       if (filesToIndex.length > 0) {
         await db.run('BEGIN TRANSACTION');
         try {
-          const stmt = await db.prepare(
-            `INSERT OR REPLACE INTO local_file_cache 
-             (connection_id, rel_path, name, is_directory, size, modified_at) 
-             VALUES (?, ?, ?, ?, ?, ?)`
-          );
-          for (const file of filesToIndex) {
-            await stmt.run(
-              this.connectionId,
-              file.relPath,
-              file.name,
-              file.isDirectory,
-              file.size,
-              file.modifiedAt
-            );
+          const chunkSize = 100;
+          for (let i = 0; i < filesToIndex.length; i += chunkSize) {
+            const chunk = filesToIndex.slice(i, i + chunkSize);
+            const placeholders = chunk.map(() => '(?, ?, ?, ?, ?, ?)').join(', ');
+            const query = `INSERT OR REPLACE INTO local_file_cache 
+              (connection_id, rel_path, name, is_directory, size, modified_at) 
+              VALUES ${placeholders}`;
+            
+            const params: any[] = [];
+            for (const file of chunk) {
+              params.push(
+                this.connectionId,
+                file.relPath,
+                file.name,
+                file.isDirectory,
+                file.size,
+                file.modifiedAt
+              );
+            }
+            await db.run(query, ...params);
+            
+            // Yield periodically to let event loop breathe between chunks
+            await new Promise(resolve => setImmediate(resolve));
           }
-          await stmt.finalize();
           await db.run('COMMIT');
         } catch (err) {
           await db.run('ROLLBACK');
@@ -900,6 +990,18 @@ class SyncSession {
     } catch (e) {
       console.error('Failed to save sync session to LogStore', e);
     }
+
+    // Update last_sync_time/duration/status in database
+    const sessionData = this.activeSession;
+    getDb().then(db => {
+      db.run(
+        `UPDATE ftp_connections SET last_sync_time = ?, last_sync_duration = ?, last_sync_status = ? WHERE id = ?`,
+        new Date().toISOString(),
+        sessionData.duration,
+        sessionData.status,
+        this.connectionId
+      ).catch((err: any) => console.error('Failed to update last_sync info:', err));
+    }).catch((err: any) => console.error('Failed to get db for last_sync update:', err));
     
     this.activeSession = null;
     if (this.sessionCloseTimer) {
@@ -992,6 +1094,14 @@ class SyncSession {
       clearInterval(this.intervalTimer);
       this.intervalTimer = null;
     }
+
+    // Close active session first so data is persisted before cleanup
+    if (this.sessionCloseTimer) {
+      clearTimeout(this.sessionCloseTimer);
+      this.sessionCloseTimer = null;
+    }
+    this.closeSession();
+
     try {
       if (!this.client.closed) {
         this.client.close();
@@ -1494,24 +1604,40 @@ class SyncSession {
 
       // Count files that need download first to populate totalFilesInBatch correctly
       const filesToDownload: any[] = [];
-      for (const file of remoteFiles) {
-        const relPath = path.posix.relative(remoteRoot, file.path);
-        const localPath = path.join(localRoot, relPath.split('/').join(path.sep));
-        if (await shouldIgnore(localRoot, localPath)) continue;
+      const ig = await getIgnoreInstance(localRoot);
 
-        let shouldDownload = false;
-        if (!fs.existsSync(localPath)) {
-          shouldDownload = true;
-        } else {
-          const localStats = fs.statSync(localPath);
+      // Asynchronous non-blocking file checks in parallel
+      const checkTasks = remoteFiles.map(async (file) => {
+        const relPath = path.posix.relative(remoteRoot, file.path);
+        const normalizedRelPath = relPath.split(path.sep).join('/');
+        
+        if (ig.ignores(normalizedRelPath)) return null;
+
+        const localPath = path.join(localRoot, relPath.split('/').join(path.sep));
+        
+        try {
+          const exists = await fs.pathExists(localPath);
+          if (!exists) {
+            return { file, localPath };
+          }
+          
+          const localStats = await fs.stat(localPath);
           const remoteTime = new Date(file.modifiedAt || 0).getTime();
           const localTime = localStats.mtime.getTime();
           if (remoteTime > localTime + 2000) {
-            shouldDownload = true;
+            return { file, localPath };
           }
+        } catch (e) {
+          // If stat fails, download it to be safe
+          return { file, localPath };
         }
-        if (shouldDownload) {
-          filesToDownload.push({ file, localPath });
+        return null;
+      });
+
+      const checkResults = await Promise.all(checkTasks);
+      for (const res of checkResults) {
+        if (res) {
+          filesToDownload.push(res);
         }
       }
 
@@ -1667,7 +1793,8 @@ class SyncSession {
 
       if (item.isDirectory) {
         // queueDirectoryUpload returns after scanning & queuing (non-blocking)
-        queuePromises.push(this.queueDirectoryUpload(fullPath));
+        // skipIgnoreCheck=true: manual bulk sync from Visual Diff bypasses .ftpignore
+        queuePromises.push(this.queueDirectoryUpload(fullPath, true));
       } else {
         // Queue the file WITHOUT awaiting the transfer itself
         this.totalFilesInBatch++;
@@ -1703,7 +1830,7 @@ class SyncSession {
     }
   }
 
-  private async queueDirectoryUpload(localDirPath: string) {
+  private async queueDirectoryUpload(localDirPath: string, skipIgnoreCheck = false) {
     if (!fs.existsSync(localDirPath)) return;
 
     try {
@@ -1719,10 +1846,10 @@ class SyncSession {
 
         if (stats.isDirectory()) {
           // Recursively queue subdirectory (await to ensure all files are counted)
-          queuePromises.push(this.queueDirectoryUpload(itemPath));
+          queuePromises.push(this.queueDirectoryUpload(itemPath, skipIgnoreCheck));
         } else {
           // Queue file WITHOUT awaiting - just add to PQueue
-          this.queueFileForUploadNonBlocking(itemPath);
+          this.queueFileForUploadNonBlocking(itemPath, skipIgnoreCheck);
         }
       }
       
@@ -1735,13 +1862,16 @@ class SyncSession {
   }
 
   // Non-blocking version that doesn't return the upload promise
-  private queueFileForUploadNonBlocking(localPath: string): void {
-    // Check ignore patterns synchronously if possible, or skip check for speed
-    // For now, we'll do async check but not await it
-    shouldIgnore(this.localRoot, localPath).then(async (ignored) => {
-      if (ignored) {
-        this.log('info', `Ignored (upload): ${path.basename(localPath)}`);
-        return;
+  // skipIgnoreCheck: when true, bypass .ftpignore check (used for manual Visual Diff uploads)
+  private queueFileForUploadNonBlocking(localPath: string, skipIgnoreCheck = false): void {
+    const doQueue = async () => {
+      // Only check ignore patterns during auto-sync, not manual uploads
+      if (!skipIgnoreCheck) {
+        const ignored = await shouldIgnore(this.localRoot, localPath);
+        if (ignored) {
+          this.log('info', `Ignored (upload): ${path.basename(localPath)}`);
+          return;
+        }
       }
 
       this.totalFilesInBatch++;
@@ -1758,7 +1888,8 @@ class SyncSession {
         if (!fs.existsSync(localPath)) return;
         await this.uploadFile(localPath);
       });
-    });
+    };
+    doQueue();
   }
 
   private async downloadDirectory(remoteDirPath: string) {
@@ -1995,6 +2126,10 @@ class SyncManager extends EventEmitter {
     super();
   }
 
+  public getActiveConnections(): number[] {
+    return Array.from(this.sessions.keys());
+  }
+
   private async getSession(connectionId: number): Promise<SyncSession> {
     if (this.sessions.has(connectionId)) {
       return this.sessions.get(connectionId)!;
@@ -2082,16 +2217,39 @@ class SyncManager extends EventEmitter {
   */
 
   public getStatus(connectionId: number) {
-    const dbLogs = logStore.getLogs(connectionId);
-    const mappedLogs = dbLogs.map(l => ({
-      timestamp: l.created_at,
-      type: l.type,
-      message: l.message
-    }));
+    const session = this.sessions.get(connectionId);
+    // Merge persisted logs with fresh in-memory logs for real-time accuracy
+    const dbLogs = logStore.getLogs(connectionId, 10);
+    const inMemoryLogs = session ? session.getLogs() : [];
+
+    // Combine: use in-memory first (most recent), fill with DB logs
+    // Deduplicate by timestamp+message
+    const seen = new Set<string>();
+    const combined: { timestamp: string; type: string; message: string }[] = [];
+
+    for (const log of inMemoryLogs) {
+      const key = `${log.timestamp}|${log.message}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        combined.push(log);
+      }
+    }
+    for (const l of dbLogs) {
+      const key = `${l.created_at}|${l.message}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        combined.push({ timestamp: l.created_at, type: l.type, message: l.message });
+      }
+    }
+
+    // Sort by timestamp descending (newest first) and limit to 20
+    combined.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+    const logs = combined.slice(0, 20);
 
     return {
       running: this.sessions.has(connectionId),
-      logs: mappedLogs
+      isSyncing: session ? session.getIsSyncing() : false,
+      logs
     };
   }
 

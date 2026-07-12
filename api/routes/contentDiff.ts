@@ -1,17 +1,17 @@
 import { Router, Request, Response } from 'express';
-import { Client } from 'basic-ftp';
 import path from 'path';
 import fs from 'fs-extra';
 import os from 'os';
 import { getDb } from '../db.js';
 import { decrypt } from '../utils/encryption.js';
+import { TransferClientFactory } from '../services/transfer/TransferClientFactory.js';
 
 const router = Router();
 
 // Temp directory for downloaded files
 const TEMP_DIR = path.join(os.tmpdir(), 'ftp_sync_diff');
 
-// Helper to get FTP client
+// Helper to get a transfer client honoring the connection's protocol (ftp/ftps/sftp)
 async function getFtpClient(connectionId: string) {
     const db = await getDb();
     const config = await db.get('SELECT * FROM ftp_connections WHERE id = ?', connectionId);
@@ -20,17 +20,19 @@ async function getFtpClient(connectionId: string) {
     const password = decrypt(config.password_hash);
     if (!password) throw new Error('Cannot decrypt password');
 
-    const client = new Client();
-    await client.access({
+    const protocol = config.protocol || 'ftp';
+    const client = TransferClientFactory.createClient(protocol, 30000);
+    await client.connect({
         host: config.server,
-        user: config.username,
+        username: config.username,
         password: password,
-        port: config.port || 21,
+        port: config.port || (protocol === 'sftp' ? 22 : 21),
         secure: config.secure ? true : false,
         secureOptions: config.secure ? {
             rejectUnauthorized: false,
             minVersion: 'TLSv1.2'
-        } : undefined
+        } : undefined,
+        privateKey: config.private_key
     });
     return { client, config };
 }

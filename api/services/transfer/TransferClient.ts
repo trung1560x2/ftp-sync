@@ -27,7 +27,6 @@ export interface TransferClient {
     uploadFrom(source: Readable | string, remotePath: string, options?: { localStart?: number }): Promise<void>;
     downloadTo(destination: string | Writable, remotePath: string, startAt?: number): Promise<void>;
     ensureDir(remotePath: string): Promise<void>;
-    ensureDir(remotePath: string): Promise<void>;
     remove(remotePath: string): Promise<void>;
     rename(oldPath: string, newPath: string): Promise<void>;
     trackProgress(handler?: (info: { bytes: number; name: string }) => void): void;

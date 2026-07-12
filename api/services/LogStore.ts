@@ -253,6 +253,11 @@ class LogStore {
             .slice(0, limit);
     }
 
+    getAllLogs(limit: number = 200): LogEntry[] {
+        this.ensureInitialized();
+        return this.logs.slice(0, limit);
+    }
+
     clearLogs(connectionId: number): void {
         this.ensureInitialized();
         this.logs = this.logs.filter(l => l.connection_id !== connectionId);
@@ -289,6 +294,44 @@ class LogStore {
         let total_uploaded = 0;
         let total_downloaded = 0;
         connStats.forEach(s => {
+            if (s.direction === 'upload') total_uploaded += s.bytes;
+            else total_downloaded += s.bytes;
+        });
+
+        return {
+            dailyStats,
+            totalStats: { total_uploaded, total_downloaded }
+        };
+    }
+
+    getAllStats() {
+        this.ensureInitialized();
+
+        // Daily stats for last 7 days
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+        const dailyStats: { date: string; direction: string; total_bytes: number }[] = [];
+        const dailyMap: Record<string, Record<string, number>> = {};
+
+        this.stats
+            .filter(s => new Date(s.created_at) > sevenDaysAgo)
+            .forEach(s => {
+                const date = s.created_at.split('T')[0];
+                if (!dailyMap[date]) dailyMap[date] = { upload: 0, download: 0 };
+                dailyMap[date][s.direction] += s.bytes;
+            });
+
+        Object.entries(dailyMap).forEach(([date, dirs]) => {
+            dailyStats.push({ date, direction: 'upload', total_bytes: dirs.upload });
+            dailyStats.push({ date, direction: 'download', total_bytes: dirs.download });
+        });
+        dailyStats.sort((a, b) => a.date.localeCompare(b.date));
+
+        // Total stats
+        let total_uploaded = 0;
+        let total_downloaded = 0;
+        this.stats.forEach(s => {
             if (s.direction === 'upload') total_uploaded += s.bytes;
             else total_downloaded += s.bytes;
         });
@@ -344,6 +387,11 @@ class LogStore {
         return this.syncSessions
             .filter(s => s.connection_id === connectionId)
             .slice(0, limit);
+    }
+
+    public getAllSyncSessions(limit: number = 50): SyncSessionEntry[] {
+        this.ensureInitialized();
+        return this.syncSessions.slice(0, limit);
     }
 
     public clearSyncSessions(connectionId: number, customBackupPath?: string): void {
