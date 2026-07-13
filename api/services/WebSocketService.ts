@@ -11,6 +11,15 @@ class WebSocketService {
     console.log('[WS] Initializing WebSocket Server...');
     this.wss = new WebSocketServer({ noServer: true });
 
+    // Handle host key verification events and send to the owner client
+    sshTerminalService.onHostKeyVerify = (sessionId, details) => {
+      this.sendToTerminalOwner(sessionId, {
+        type: 'terminal:hostkey-verify',
+        sessionId,
+        ...details
+      });
+    };
+
     // Handle HTTP Upgrade request manually to serve under /api/ws
     server.on('upgrade', (request: any, socket: any, head: any) => {
       const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;

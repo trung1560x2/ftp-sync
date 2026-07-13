@@ -85,8 +85,10 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
     bufferSize: 16,
     protocol: 'ftp',
     privateKey: '',
+    sshKeyId: null,
     conflictResolution: 'overwrite',
-    excludePaths: ''
+    excludePaths: '',
+    enableChecksum: false
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -108,6 +110,25 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
   const [ignoreLoading, setIgnoreLoading] = useState(false);
   const [ignoreSaveStatus, setIgnoreSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
+  // Managed SSH Keys State
+  const [managedKeys, setManagedKeys] = useState<{ id: number; name: string; type: string; publicKey: string }[]>([]);
+  const [authMethod, setAuthMethod] = useState<'password' | 'privateKey' | 'managedKey'>('password');
+
+  useEffect(() => {
+    const fetchKeys = async () => {
+      try {
+        const res = await fetch('/api/ssh-keys');
+        const data = await res.json();
+        if (data.success) {
+          setManagedKeys(data.keys);
+        }
+      } catch (err) {
+        console.error('Failed to load managed keys:', err);
+      }
+    };
+    fetchKeys();
+  }, []);
+
   useEffect(() => {
     if (initialData) {
       setFormData({
@@ -126,9 +147,20 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
         bufferSize: initialData.buffer_size || 16,
         protocol: initialData.protocol || 'ftp',
         privateKey: initialData.private_key || '',
+        sshKeyId: initialData.ssh_key_id || null,
         conflictResolution: initialData.conflict_resolution || 'overwrite',
-        excludePaths: initialData.exclude_paths || ''
+        excludePaths: initialData.exclude_paths || '',
+        enableChecksum: !!initialData.enable_checksum
       });
+
+      if (initialData.ssh_key_id) {
+        setAuthMethod('managedKey');
+      } else if (initialData.private_key) {
+        setAuthMethod('privateKey');
+      } else {
+        setAuthMethod('password');
+      }
+
       // If editing and localPath exists, assume valid initially or recheck
       if (initialData.local_path) {
         checkPath(initialData.local_path);
@@ -320,6 +352,11 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
     let validationStatus: 'verified' | 'failed' | 'unverified' = 'unverified';
     let validationMessage = '';
 
+    // Adjust credentials based on authMethod
+    const finalPassword = authMethod === 'password' ? formData.password : '';
+    const finalPrivateKey = authMethod === 'privateKey' ? formData.privateKey : '';
+    const finalSshKeyId = authMethod === 'managedKey' ? formData.sshKeyId : null;
+
     try {
       // 1. Check local path validity
       if (formData.localPath) {
@@ -344,9 +381,10 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
             server: formData.server,
             port: formData.port,
             username: formData.username,
-            password: formData.password,
+            password: finalPassword,
             protocol: formData.protocol,
-            privateKey: formData.privateKey,
+            privateKey: finalPrivateKey,
+            sshKeyId: finalSshKeyId,
             id: initialData?.id
           })
         });
@@ -374,6 +412,9 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
         },
         body: JSON.stringify({
           ...formData,
+          password: finalPassword,
+          privateKey: finalPrivateKey,
+          sshKeyId: finalSshKeyId,
           validationStatus,
           validationMessage
         }),
@@ -502,7 +543,7 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
                 />
               </div>
 
-              {/* Username & Password */}
+              {/* Username & Auth Type Selection */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5 font-mono">
@@ -518,48 +559,71 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
                     className="w-full px-3.5 py-2 bg-[#0d0e12]/40 border border-neutral-800/50 hover:border-neutral-700/60 focus:border-orange-500/80 focus:ring-1 focus:ring-orange-500/20 rounded-lg text-xs text-neutral-200 font-mono outline-none"
                   />
                 </div>
+
+                {formData.protocol === 'sftp' && (
+                  <div className="flex flex-col justify-end">
+                    <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5 font-mono">
+                      Auth Method
+                    </label>
+                    <div className="flex bg-[#0d0e12]/60 p-0.5 border border-neutral-800/50 rounded-lg gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() => setAuthMethod('password')}
+                        className={`flex-1 text-center py-1 rounded text-[9px] font-bold uppercase tracking-wider font-mono transition-all ${
+                          authMethod === 'password' ? 'bg-orange-500 text-white shadow-sm' : 'text-neutral-500 hover:text-neutral-300'
+                        }`}
+                      >
+                        Password
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAuthMethod('privateKey')}
+                        className={`flex-1 text-center py-1 rounded text-[9px] font-bold uppercase tracking-wider font-mono transition-all ${
+                          authMethod === 'privateKey' ? 'bg-orange-500 text-white shadow-sm' : 'text-neutral-500 hover:text-neutral-300'
+                        }`}
+                      >
+                        Custom Key
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAuthMethod('managedKey')}
+                        className={`flex-1 text-center py-1 rounded text-[9px] font-bold uppercase tracking-wider font-mono transition-all ${
+                          authMethod === 'managedKey' ? 'bg-orange-500 text-white shadow-sm' : 'text-neutral-500 hover:text-neutral-300'
+                        }`}
+                      >
+                        Managed Key
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Conditional Credentials Input */}
+              {(formData.protocol !== 'sftp' || authMethod === 'password') && (
                 <div>
                   <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5 font-mono">
                     Password {initialData && <span className="text-neutral-600 font-normal font-sans">(Keep current if blank)</span>}
-                    {!initialData && !formData.privateKey && <span className="text-red-500 ml-1 font-sans">*</span>}
+                    {!initialData && <span className="text-red-500 ml-1 font-sans">*</span>}
                   </label>
                   <input
                     type="password"
                     name="password"
                     value={formData.password}
                     onChange={handleChange}
-                    required={!initialData && !formData.privateKey}
+                    required={!initialData}
                     className={`w-full px-3.5 py-2 bg-[#0d0e12]/40 border focus:outline-none focus:border-orange-500/80 focus:ring-1 focus:ring-orange-500/20 rounded-lg text-xs text-neutral-200 font-mono outline-none ${
-                      !initialData && !formData.privateKey && !formData.password && error ? 'border-red-900' : 'border-neutral-800/50'
+                      !initialData && !formData.password && error ? 'border-red-900' : 'border-neutral-800/50'
                     }`}
-                    placeholder={formData.protocol === 'sftp' && formData.privateKey ? 'PASSPHRASE (OPTIONAL)' : 'PASSWORD'}
+                    placeholder="PASSWORD"
                   />
-                </div>
-              </div>
-
-              {/* FTPS SSL Option */}
-              {formData.protocol !== 'sftp' && (
-                <div className="flex items-center pl-1 pt-1">
-                  <input
-                    id="secure"
-                    name="secure"
-                    type="checkbox"
-                    checked={formData.secure}
-                    onChange={handleChange}
-                    className="h-4 w-4 bg-[#0d0e12] border-neutral-800 text-orange-600 focus:ring-0 focus:ring-offset-0 rounded cursor-pointer"
-                  />
-                  <label htmlFor="secure" className="ml-2.5 block text-xs text-neutral-400 select-none uppercase tracking-wide cursor-pointer font-bold font-mono">
-                    Use SSL/TLS (FTPS Encryption)
-                  </label>
                 </div>
               )}
 
-              {/* SFTP Private Key (Conditional) */}
-              {formData.protocol === 'sftp' ? (
+              {formData.protocol === 'sftp' && authMethod === 'privateKey' && (
                 <div>
                   <div className="flex justify-between items-center mb-1.5">
                     <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 font-mono">
-                      Private Key <span className="text-neutral-600 font-normal font-sans">(Optional if password is set)</span>
+                      Private Key <span className="text-neutral-600 font-normal font-sans">(PEM Format)</span>
                     </label>
                     <label className="text-[9px] font-bold uppercase tracking-wider text-orange-500 hover:text-orange-400 cursor-pointer transition-colors bg-[#0d0e12]/60 border border-neutral-800/60 hover:border-neutral-700/60 rounded px-2.5 py-1 select-none">
                       Upload Key File
@@ -580,14 +644,48 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
                   />
                   <p className="text-[9px] text-neutral-500 mt-1 uppercase font-mono">Paste OpenSSH private key format here.</p>
                 </div>
-              ) : (
-                <div className="h-28 border border-dashed border-neutral-800/40 p-4 flex flex-col justify-center items-center text-center select-none rounded-xl">
-                  <span className="text-[9px] font-bold uppercase tracking-widest text-neutral-600 mb-1">
-                    Key Auth Offline
-                  </span>
-                  <span className="text-[8px] font-mono text-neutral-700 uppercase">
-                    Only active for SFTP protocol
-                  </span>
+              )}
+
+              {formData.protocol === 'sftp' && authMethod === 'managedKey' && (
+                <div>
+                  <label className="block text-[9px] font-bold uppercase tracking-widest text-neutral-500 mb-1.5 font-mono">
+                    Select Managed SSH Key
+                  </label>
+                  {managedKeys.length === 0 ? (
+                    <div className="w-full px-3.5 py-3 bg-[#0d0e12]/40 border border-neutral-800/40 border-dashed rounded-lg text-xs text-neutral-500 font-mono text-center select-none">
+                      No managed keys found. Please create one in Key Manager.
+                    </div>
+                  ) : (
+                    <select
+                      value={formData.sshKeyId || ''}
+                      onChange={(e) => setFormData(prev => ({ ...prev, sshKeyId: e.target.value ? parseInt(e.target.value) : null }))}
+                      className="w-full px-3.5 py-2 bg-[#0d0e12]/40 border border-neutral-800/50 hover:border-neutral-700/60 focus:border-orange-500/80 focus:ring-1 focus:ring-orange-500/20 rounded-lg text-xs text-neutral-200 font-mono outline-none cursor-pointer"
+                    >
+                      <option value="" className="bg-[#0f111a]">-- SELECT KEY --</option>
+                      {managedKeys.map(k => (
+                        <option key={k.id} value={k.id} className="bg-[#0f111a]">
+                          {k.name} ({k.type.toUpperCase()})
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              )}
+
+              {/* FTPS SSL Option */}
+              {formData.protocol !== 'sftp' && (
+                <div className="flex items-center pl-1 pt-1">
+                  <input
+                    id="secure"
+                    name="secure"
+                    type="checkbox"
+                    checked={formData.secure}
+                    onChange={handleChange}
+                    className="h-4 w-4 bg-[#0d0e12] border-neutral-800 text-orange-600 focus:ring-0 focus:ring-offset-0 rounded cursor-pointer"
+                  />
+                  <label htmlFor="secure" className="ml-2.5 block text-xs text-neutral-400 select-none uppercase tracking-wide cursor-pointer font-bold font-mono">
+                    Use SSL/TLS (FTPS Encryption)
+                  </label>
                 </div>
               )}
             </div>
@@ -791,6 +889,28 @@ const FTPConnectionForm: React.FC<Props> = ({ initialData, onSuccess, onCancel }
                   </span>
                 </div>
               )}
+
+              {/* Checksum Verification */}
+              <div className="flex items-start p-3 bg-neutral-900/30 border border-neutral-800/60 rounded-xl select-none">
+                <div className="flex items-center h-5">
+                  <input
+                    id="enableChecksum"
+                    name="enableChecksum"
+                    type="checkbox"
+                    checked={formData.enableChecksum}
+                    onChange={(e) => setFormData({ ...formData, enableChecksum: e.target.checked })}
+                    className="h-4 w-4 bg-[#0d0e12] border-neutral-800 text-orange-500 focus:ring-0 rounded cursor-pointer"
+                  />
+                </div>
+                <div className="ml-3 text-xs">
+                  <label htmlFor="enableChecksum" className="font-bold text-neutral-300 uppercase tracking-wider select-none cursor-pointer font-mono">
+                    Enable Checksum Validation
+                  </label>
+                  <p className="text-neutral-500/80 text-[9px] mt-1 uppercase font-semibold font-mono">
+                    Compares file hash digests (MD5) post-transfer to ensure end-to-end data integrity.
+                  </p>
+                </div>
+              </div>
 
               {/* Exclude Paths (Ignore patterns) */}
               <div>

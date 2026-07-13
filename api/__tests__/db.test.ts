@@ -23,10 +23,12 @@ describe('Database Migrations Engine', () => {
     await fs.emptyDir(testBaseDir);
     // Change cwd to temp directory so relative path 'api/migrations' resolves there
     process.chdir(testBaseDir);
+    process.env.MIGRATIONS_DIR = path.join(testBaseDir, 'api', 'migrations');
   });
 
   afterEach(() => {
     process.chdir(originalCwd);
+    delete process.env.MIGRATIONS_DIR;
   });
 
   it('should run migrations sequentially on a new database', async () => {

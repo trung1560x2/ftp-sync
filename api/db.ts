@@ -2,8 +2,24 @@ import sqlite3 from 'sqlite3';
 import { open, Database } from 'sqlite';
 import path from 'path';
 import fs from 'fs-extra';
+import { fileURLToPath } from 'url';
+import { decrypt } from './utils/encryption.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 let db: Database | null = null;
+
+const logErrorToFile = (message: string, err: any) => {
+  try {
+    const logDir = process.env.DB_PATH ? path.dirname(process.env.DB_PATH) : process.cwd();
+    const logFile = path.join(logDir, 'omnisync_debug.log');
+    const logMessage = `[${new Date().toISOString()}] ${message}\nError: ${err?.message || err}\nStack: ${err?.stack || ''}\n\n`;
+    fs.appendFileSync(logFile, logMessage, 'utf8');
+  } catch (e) {
+    console.error('Failed to write debug log to file:', e);
+  }
+};
 
 export const runMigrations = async (database: Database) => {
   // 1. Ensure schema_version table exists
@@ -31,7 +47,7 @@ export const runMigrations = async (database: Database) => {
   }
 
   // 4. Read all migration files
-  const migrationsDir = path.resolve(process.cwd(), 'api/migrations');
+  const migrationsDir = process.env.MIGRATIONS_DIR || path.join(__dirname, 'migrations');
   if (!await fs.pathExists(migrationsDir)) {
     throw new Error(`Migrations directory not found at: ${migrationsDir}`);
   }
@@ -66,6 +82,7 @@ export const runMigrations = async (database: Database) => {
       } catch (err) {
         await database.exec('ROLLBACK;');
         console.error(`Failed to apply migration v${migration.version}:`, err);
+        logErrorToFile(`Failed to apply migration v${migration.version}`, err);
         throw err;
       }
     }
@@ -90,8 +107,46 @@ export const initDb = async () => {
     // Enable WAL mode and synchronous optimizations for high concurrency
     await db.exec('PRAGMA journal_mode = WAL;');
     await db.exec('PRAGMA synchronous = NORMAL;');
+
+    // Wrap database.get and database.all to intercept connection rows
+    const originalGet = db.get.bind(db);
+    db.get = async function (sql: string, ...params: any[]) {
+      const row = await originalGet(sql, ...params);
+      if (row && typeof row === 'object' && 'server' in row && 'username' in row) {
+        if (row.ssh_key_id) {
+          const managedKey = await originalGet('SELECT private_key FROM ssh_keys WHERE id = ?', row.ssh_key_id);
+          if (managedKey) {
+            const decryptedKey = decrypt(managedKey.private_key);
+            row.private_key = decryptedKey;
+            row.ssh_private_key = decryptedKey;
+          }
+        }
+      }
+      return row;
+    } as any;
+
+    const originalAll = db.all.bind(db);
+    db.all = async function (sql: string, ...params: any[]) {
+      const rows = await originalAll(sql, ...params);
+      if (Array.isArray(rows)) {
+        for (const row of rows) {
+          if (row && typeof row === 'object' && 'server' in row && 'username' in row) {
+            if (row.ssh_key_id) {
+              const managedKey = await originalGet('SELECT private_key FROM ssh_keys WHERE id = ?', row.ssh_key_id);
+              if (managedKey) {
+                const decryptedKey = decrypt(managedKey.private_key);
+                row.private_key = decryptedKey;
+                row.ssh_private_key = decryptedKey;
+              }
+            }
+          }
+        }
+      }
+      return rows;
+    } as any;
   } catch (err: any) {
     console.error('Failed to open database:', err);
+    logErrorToFile('Failed to initialize database', err);
     // Fallback to memory db if file access fails, just to keep app running (though data wont persist)
     // or re-throw to show error. Let's re-throw but with clearer message
     throw new Error(`Failed to open database at ${dbPath}: ${err.message}`);

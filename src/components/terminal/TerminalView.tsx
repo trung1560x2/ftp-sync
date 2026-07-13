@@ -3,6 +3,8 @@ import TerminalPane from './TerminalPane';
 import TerminalTabBar, { TerminalTab } from './TerminalTabBar';
 import SplitContainer from './SplitContainer';
 import SftpFileBrowser from './SftpFileBrowser';
+import SSHKeyManager from './SSHKeyManager';
+import PortForwardDashboard from './PortForwardDashboard';
 import {
   Terminal,
   SplitSquareHorizontal,
@@ -17,7 +19,14 @@ import {
   Download,
   FileSearch,
   FolderOpen,
+  Settings,
+  Check,
+  Trash,
+  RotateCcw,
+  AlertTriangle,
+  FileText,
 } from 'lucide-react';
+import { useTerminalSettings, terminalSettingsStore, MONOSPACE_FONTS, TERMINAL_THEMES, TerminalProfile } from '../../stores/terminalSettingsStore';
 
 interface Connection {
   id: number;
@@ -28,12 +37,17 @@ interface Connection {
 }
 
 const TerminalView: React.FC = () => {
+  const { profiles, activeProfile, isLoading, error } = useTerminalSettings();
+  const [showSettingsPanel, setShowSettingsPanel] = useState(false);
+  const [newProfileName, setNewProfileName] = useState('');
+
   const [tabs, setTabs] = useState<TerminalTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [connections, setConnections] = useState<Connection[]>([]);
   const [showConnectionPicker, setShowConnectionPicker] = useState(false);
   const [splitMode, setSplitMode] = useState<'none' | 'horizontal' | 'vertical'>('none');
   const [splitTabIds, setSplitTabIds] = useState<[string, string] | null>(null);
+  const [subSection, setSubSection] = useState<'terminals' | 'portForwards' | 'keys'>('terminals');
 
   const [isInitialized, setIsInitialized] = useState(false);
   const [pendingSplitDirection, setPendingSplitDirection] = useState<'horizontal' | 'vertical' | null>(null);
@@ -67,35 +81,86 @@ const TerminalView: React.FC = () => {
       .catch(console.error);
   }, []);
 
-  // Restore tabs from localStorage on mount and check active backend sessions
+  const reconnectTab = useCallback(async (tabId: string) => {
+    const tab = tabs.find((t) => t.id === tabId);
+    if (!tab || tab.isConnected || !tab.connectionId) return;
+
+    // Show reconnecting state locally
+    setTabs((prev) =>
+      prev.map((t) => (t.id === tabId ? { ...t, title: `Connecting...` } : t))
+    );
+
+    try {
+      const res = await fetch('/api/terminal/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connectionId: tab.connectionId }),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message || 'Failed to create session');
+
+      const conn = connections.find((c) => c.id === tab.connectionId);
+      const originalTitle = conn?.name || conn?.server || 'Terminal';
+
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === tabId
+            ? {
+                ...t,
+                sessionId: data.sessionId,
+                isConnected: true,
+                title: originalTitle
+              }
+            : t
+        )
+      );
+    } catch (error: any) {
+      console.error(`Failed to reconnect tab ${tabId}:`, error);
+      const conn = connections.find((c) => c.id === tab.connectionId);
+      const originalTitle = conn?.name || conn?.server || 'Terminal';
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === tabId ? { ...t, title: `${originalTitle} (Retry)`, isConnected: false } : t
+        )
+      );
+    }
+  }, [tabs, connections]);
+
+  // Restore tabs from backend database on mount
   useEffect(() => {
     const restoreTabs = async () => {
       try {
-        const storedTabsStr = localStorage.getItem('omnisync_terminal_tabs');
+        const savedTabs = await terminalSettingsStore.fetchSavedTabs();
         const storedActiveTabId = localStorage.getItem('omnisync_terminal_active_tab_id');
         const storedSplitMode = localStorage.getItem('omnisync_terminal_split_mode') as 'none' | 'horizontal' | 'vertical' | null;
         const storedSplitTabIdsStr = localStorage.getItem('omnisync_terminal_split_tab_ids');
         
-        if (storedTabsStr) {
-          const storedTabs = JSON.parse(storedTabsStr) as TerminalTab[];
-          
+        if (savedTabs.length > 0) {
           const res = await fetch('/api/terminal/sessions');
           const data = await res.json();
           if (data.success && Array.isArray(data.sessions)) {
             const activeSessionIds = new Set(data.sessions.map((s: any) => s.id));
-            const validTabs = storedTabs.filter((t) => activeSessionIds.has(t.sessionId));
+            const processedTabs = savedTabs.map((t) => {
+              const activeSession = data.sessions.find((s: any) => s.connectionId === t.connectionId);
+              const isConnected = activeSession ? true : false;
+              return {
+                ...t,
+                isConnected,
+                sessionId: isConnected ? activeSession.id : ''
+              };
+            });
             
-            setTabs(validTabs);
-            if (validTabs.length > 0) {
-              if (storedActiveTabId && validTabs.some((t) => t.id === storedActiveTabId)) {
+            setTabs(processedTabs);
+            if (processedTabs.length > 0) {
+              if (storedActiveTabId && processedTabs.some((t) => t.id === storedActiveTabId)) {
                 setActiveTabId(storedActiveTabId);
               } else {
-                setActiveTabId(validTabs[0].id);
+                setActiveTabId(processedTabs[0].id);
               }
 
               if (storedSplitMode && storedSplitMode !== 'none' && storedSplitTabIdsStr) {
                 const storedSplitTabIds = JSON.parse(storedSplitTabIdsStr) as [string, string];
-                if (validTabs.some((t) => t.id === storedSplitTabIds[0]) && validTabs.some((t) => t.id === storedSplitTabIds[1])) {
+                if (processedTabs.some((t) => t.id === storedSplitTabIds[0]) && processedTabs.some((t) => t.id === storedSplitTabIds[1])) {
                   setSplitMode(storedSplitMode);
                   setSplitTabIds(storedSplitTabIds);
                 }
@@ -113,14 +178,10 @@ const TerminalView: React.FC = () => {
     restoreTabs();
   }, []);
 
-  // Save tabs to localStorage
+  // Save tabs to Backend Database
   useEffect(() => {
     if (!isInitialized) return;
-    if (tabs.length > 0) {
-      localStorage.setItem('omnisync_terminal_tabs', JSON.stringify(tabs));
-    } else {
-      localStorage.removeItem('omnisync_terminal_tabs');
-    }
+    terminalSettingsStore.syncTabs(tabs);
   }, [tabs, isInitialized]);
 
   // Save active tab id
@@ -143,6 +204,95 @@ const TerminalView: React.FC = () => {
       localStorage.removeItem('omnisync_terminal_split_tab_ids');
     }
   }, [splitMode, splitTabIds, isInitialized]);
+
+  // Trigger auto-reconnect on visible unconnected tabs
+  useEffect(() => {
+    if (!isInitialized) return;
+
+    const visibleTabIds = new Set<string>();
+    if (splitMode !== 'none' && splitTabIds && splitTabIds.length === 2) {
+      visibleTabIds.add(splitTabIds[0]);
+      visibleTabIds.add(splitTabIds[1]);
+    } else if (activeTabId) {
+      visibleTabIds.add(activeTabId);
+    }
+
+    for (const tabId of visibleTabIds) {
+      const tab = tabs.find((t) => t.id === tabId);
+      if (tab && !tab.isConnected && tab.connectionId) {
+        reconnectTab(tabId);
+      }
+    }
+  }, [activeTabId, splitMode, splitTabIds, isInitialized, tabs, reconnectTab]);
+
+  // Periodically query CWD of active session and save it
+  useEffect(() => {
+    if (!isInitialized || !activeTabId) return;
+    const activeTab = tabs.find((t) => t.id === activeTabId);
+    if (!activeTab || !activeTab.isConnected || !activeTab.sessionId) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/terminal/sessions/${activeTab.sessionId}/cwd`);
+        const data = await res.json();
+        if (data.success && data.cwd && data.cwd !== activeTab.cwd) {
+          setTabs((prev) =>
+            prev.map((t) => (t.id === activeTabId ? { ...t, cwd: data.cwd } : t))
+          );
+        }
+      } catch (err) {
+        // Silent error
+      }
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [activeTabId, isInitialized, tabs]);
+
+  const handleUpdateTabColor = useCallback((tabId: string, color: string | undefined) => {
+    setTabs((prev) =>
+      prev.map((t) => (t.id === tabId ? { ...t, color } : t))
+    );
+  }, []);
+
+  const handleRenameTab = useCallback((tabId: string, newTitle: string) => {
+    setTabs((prev) =>
+      prev.map((t) => (t.id === tabId ? { ...t, title: newTitle } : t))
+    );
+  }, []);
+
+  const handleImportSshConfig = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const res = await fetch('/api/terminal/ssh-config/import', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: formData
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert(data.message);
+        // Refresh connection list
+        fetch('/api/ftp-connections')
+          .then((res) => res.json())
+          .then((data) => setConnections(Array.isArray(data) ? data : []))
+          .catch(console.error);
+        setShowConnectionPicker(false);
+      } else {
+        alert('Failed to import config: ' + data.message);
+      }
+    } catch (err: any) {
+      alert('Error importing config: ' + err.message);
+    } finally {
+      e.target.value = '';
+    }
+  }, []);
 
   const generateId = () => crypto.randomUUID?.() || Math.random().toString(36).slice(2);
 
@@ -389,6 +539,285 @@ const TerminalView: React.FC = () => {
     return () => window.removeEventListener('keydown', handler);
   }, [tabs, activeTabId, handleNewTab, handleCloseTab]);
 
+  const renderSettingsDrawer = () => {
+    return (
+      <div className="flex flex-col h-full bg-neutral-900 border-l border-neutral-800 text-neutral-300 select-none">
+        {/* Title */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800 bg-neutral-900/50">
+          <div className="flex items-center gap-2">
+            <Settings size={14} className="text-orange-500" />
+            <span className="text-xs font-mono uppercase tracking-wider text-neutral-200">Terminal Settings</span>
+          </div>
+          <button onClick={() => setShowSettingsPanel(false)} className="text-neutral-500 hover:text-neutral-300">
+            <X size={14} />
+          </button>
+        </div>
+
+        {/* Scrollable Container */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-5">
+          {/* Active Profile Selection */}
+          <div className="space-y-2">
+            <label className="block text-[10px] font-mono text-neutral-500 uppercase">Profile Selector</label>
+            <div className="flex gap-2">
+              <select
+                value={activeProfile.id || ''}
+                onChange={(e) => {
+                  const p = profiles.find(pr => pr.id === parseInt(e.target.value));
+                  if (p) terminalSettingsStore.selectProfile(p);
+                }}
+                className="flex-1 px-3 py-1.5 bg-neutral-950 border border-neutral-800 rounded font-mono text-xs text-neutral-300 focus:outline-none focus:border-orange-500"
+              >
+                {profiles.map(p => (
+                  <option key={p.id} value={p.id}>{p.name} {p.is_default ? '(Default)' : ''}</option>
+                ))}
+              </select>
+              {activeProfile.id && !activeProfile.is_default && (
+                <button
+                  onClick={async () => {
+                    if (confirm('Delete this profile?')) {
+                      await terminalSettingsStore.deleteProfile(activeProfile.id!);
+                    }
+                  }}
+                  className="p-1.5 text-rose-500 hover:text-rose-400 border border-neutral-800 hover:border-neutral-700 bg-neutral-950 rounded transition-colors"
+                  title="Delete Profile"
+                >
+                  <Trash size={12} />
+                </button>
+              )}
+            </div>
+
+            {/* Create Profile */}
+            <div className="flex gap-2 mt-2">
+              <input
+                type="text"
+                value={newProfileName}
+                onChange={(e) => setNewProfileName(e.target.value)}
+                placeholder="New profile name..."
+                className="flex-1 px-3 py-1 bg-neutral-950 border border-neutral-800 rounded font-mono text-xs text-neutral-300 focus:outline-none focus:border-orange-500"
+              />
+              <button
+                onClick={async () => {
+                  if (!newProfileName.trim()) return;
+                  await terminalSettingsStore.createProfile({
+                    name: newProfileName.trim(),
+                    theme: activeProfile.theme,
+                    font_family: activeProfile.font_family,
+                    font_size: activeProfile.font_size,
+                    line_height: activeProfile.line_height,
+                    letter_spacing: activeProfile.letter_spacing,
+                    enable_ligatures: activeProfile.enable_ligatures,
+                    scrollback_limit: activeProfile.scrollback_limit,
+                    custom_keybindings: activeProfile.custom_keybindings,
+                    is_default: false
+                  });
+                  setNewProfileName('');
+                }}
+                className="px-3 py-1 text-xs font-mono font-bold uppercase bg-orange-600 hover:bg-orange-500 text-black border border-orange-700 rounded transition-colors"
+              >
+                Create
+              </button>
+            </div>
+          </div>
+
+          <div className="h-px bg-neutral-800/60" />
+
+          {/* Color Schemes */}
+          <div className="space-y-2">
+            <label className="block text-[10px] font-mono text-neutral-500 uppercase">Color Schemes</label>
+            <div className="grid grid-cols-2 gap-2">
+              {Object.keys(TERMINAL_THEMES).map(themeKey => {
+                const theme = TERMINAL_THEMES[themeKey];
+                const isActive = activeProfile.theme === themeKey;
+                return (
+                  <button
+                    key={themeKey}
+                    onClick={() => {
+                      if (activeProfile.id) {
+                        terminalSettingsStore.updateProfile(activeProfile.id, { theme: themeKey });
+                      }
+                    }}
+                    onMouseEnter={() => terminalSettingsStore.setHoveredTheme(themeKey)}
+                    onMouseLeave={() => terminalSettingsStore.setHoveredTheme(null)}
+                    className={`flex flex-col p-2 bg-neutral-950 border rounded text-left transition-all ${
+                      isActive ? 'border-orange-500' : 'border-neutral-800 hover:border-neutral-700'
+                    }`}
+                  >
+                    <div className="text-[10px] font-mono font-bold text-neutral-400 truncate mb-1.5 flex justify-between items-center w-full">
+                      <span>{theme.name}</span>
+                      {isActive && <Check size={8} className="text-orange-500" />}
+                    </div>
+                    {/* Tiny Color Palette Preview */}
+                    <div className="flex gap-0.5 w-full h-1.5 rounded overflow-hidden">
+                      <div className="flex-1" style={{ background: theme.background }} />
+                      <div className="flex-1" style={{ background: theme.foreground }} />
+                      <div className="flex-1" style={{ background: theme.red }} />
+                      <div className="flex-1" style={{ background: theme.green }} />
+                      <div className="flex-1" style={{ background: theme.yellow }} />
+                      <div className="flex-1" style={{ background: theme.blue }} />
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="h-px bg-neutral-800/60" />
+
+          {/* Font Typography */}
+          <div className="space-y-3">
+            <label className="block text-[10px] font-mono text-neutral-500 uppercase">Typography</label>
+            
+            {/* Font Family Selector */}
+            <div>
+              <span className="text-[10px] font-mono text-neutral-600 block mb-1">Font Family</span>
+              <select
+                value={activeProfile.font_family}
+                onChange={(e) => {
+                  if (activeProfile.id) {
+                    terminalSettingsStore.updateProfile(activeProfile.id, { font_family: e.target.value });
+                  }
+                }}
+                className="w-full px-3 py-1.5 bg-neutral-950 border border-neutral-800 rounded font-mono text-xs text-neutral-300 focus:outline-none focus:border-orange-500"
+              >
+                {MONOSPACE_FONTS.map(f => (
+                  <option key={f.name} value={f.name}>{f.name}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Font Size Slider */}
+            <div>
+              <div className="flex justify-between text-[10px] font-mono text-neutral-600 mb-1">
+                <span>Font Size</span>
+                <span className="text-neutral-400">{activeProfile.font_size}px</span>
+              </div>
+              <input
+                type="range"
+                min="10"
+                max="24"
+                value={activeProfile.font_size}
+                onChange={(e) => {
+                  if (activeProfile.id) {
+                    terminalSettingsStore.updateProfile(activeProfile.id, { font_size: parseInt(e.target.value) });
+                  }
+                }}
+                className="w-full accent-orange-500"
+              />
+            </div>
+
+            {/* Line Height Slider */}
+            <div>
+              <div className="flex justify-between text-[10px] font-mono text-neutral-600 mb-1">
+                <span>Line Height</span>
+                <span className="text-neutral-400">{activeProfile.line_height}</span>
+              </div>
+              <input
+                type="range"
+                min="1"
+                max="2"
+                step="0.05"
+                value={activeProfile.line_height}
+                onChange={(e) => {
+                  if (activeProfile.id) {
+                    terminalSettingsStore.updateProfile(activeProfile.id, { line_height: parseFloat(e.target.value) });
+                  }
+                }}
+                className="w-full accent-orange-500"
+              />
+            </div>
+
+            {/* Letter Spacing Slider */}
+            <div>
+              <div className="flex justify-between text-[10px] font-mono text-neutral-600 mb-1">
+                <span>Letter Spacing</span>
+                <span className="text-neutral-400">{activeProfile.letter_spacing}px</span>
+              </div>
+              <input
+                type="range"
+                min="-2"
+                max="4"
+                step="0.5"
+                value={activeProfile.letter_spacing}
+                onChange={(e) => {
+                  if (activeProfile.id) {
+                    terminalSettingsStore.updateProfile(activeProfile.id, { letter_spacing: parseFloat(e.target.value) });
+                  }
+                }}
+                className="w-full accent-orange-500"
+              />
+            </div>
+
+            {/* Ligatures Toggles */}
+            <div className="flex items-center justify-between text-xs font-mono text-neutral-400 mt-2">
+              <span>Enable Ligatures</span>
+              <input
+                type="checkbox"
+                checked={activeProfile.enable_ligatures}
+                onChange={(e) => {
+                  if (activeProfile.id) {
+                    terminalSettingsStore.updateProfile(activeProfile.id, { enable_ligatures: e.target.checked });
+                  }
+                }}
+                className="accent-orange-500 rounded bg-neutral-950 border-neutral-800 focus:ring-0 focus:ring-offset-0"
+              />
+            </div>
+          </div>
+
+          <div className="h-px bg-neutral-800/60" />
+
+          {/* Scrollback Limit */}
+          <div className="space-y-2">
+            <label className="block text-[10px] font-mono text-neutral-500 uppercase">Scrollback buffer</label>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min="1000"
+                max="100000"
+                value={activeProfile.scrollback_limit}
+                onChange={(e) => {
+                  if (activeProfile.id) {
+                    terminalSettingsStore.updateProfile(activeProfile.id, { scrollback_limit: parseInt(e.target.value) || 10000 });
+                  }
+                }}
+                className="w-full px-3 py-1.5 bg-neutral-950 border border-neutral-800 rounded font-mono text-xs text-neutral-300 focus:outline-none focus:border-orange-500"
+              />
+              <span className="text-[10px] font-mono text-neutral-600 uppercase">Lines</span>
+            </div>
+          </div>
+
+          <div className="h-px bg-neutral-800/60" />
+
+          {/* Keybindings Shortcut Reference */}
+          <div className="space-y-2">
+            <label className="block text-[10px] font-mono text-neutral-500 uppercase">Keyboard Shortcuts</label>
+            <div className="space-y-1 bg-neutral-950 border border-neutral-800/60 p-2.5 rounded text-[10px] font-mono text-neutral-400">
+              <div className="flex justify-between border-b border-neutral-800/40 pb-1">
+                <span>New Tab</span>
+                <span className="text-orange-500">Ctrl+Shift+T</span>
+              </div>
+              <div className="flex justify-between border-b border-neutral-800/40 py-1">
+                <span>Close Tab</span>
+                <span className="text-orange-500">Ctrl+Shift+W</span>
+              </div>
+              <div className="flex justify-between border-b border-neutral-800/40 py-1">
+                <span>Switch Tab</span>
+                <span className="text-orange-500">Ctrl+Tab</span>
+              </div>
+              <div className="flex justify-between border-b border-neutral-800/40 py-1">
+                <span>Copy Output</span>
+                <span className="text-orange-500">Ctrl+Shift+C</span>
+              </div>
+              <div className="flex justify-between pt-1">
+                <span>Paste Command</span>
+                <span className="text-orange-500">Ctrl+V</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   // ─── Render helpers ────────────────────────────────────────
 
   const renderTerminalArea = () => {
@@ -403,18 +832,20 @@ const TerminalView: React.FC = () => {
         return (
           <SplitContainer direction={splitMode}>
             <TerminalPane
-              key={tabDataA.sessionId}
+              key={tabDataA.id}
               sessionId={tabDataA.sessionId}
               connectionId={tabDataA.connectionId}
               isActive={activeTabId === tabA}
               onTitleChange={(title) => handleTitleChange(tabA, title)}
+              cwd={tabDataA.cwd}
             />
             <TerminalPane
-              key={tabDataB.sessionId}
+              key={tabDataB.id}
               sessionId={tabDataB.sessionId}
               connectionId={tabDataB.connectionId}
               isActive={activeTabId === tabB}
               onTitleChange={(title) => handleTitleChange(tabB, title)}
+              cwd={tabDataB.cwd}
             />
           </SplitContainer>
         );
@@ -426,11 +857,12 @@ const TerminalView: React.FC = () => {
 
     return (
       <TerminalPane
-        key={activeTab.sessionId}
+        key={activeTab.id}
         sessionId={activeTab.sessionId}
         connectionId={activeTab.connectionId}
         isActive={true}
         onTitleChange={(title) => handleTitleChange(activeTab.id, title)}
+        cwd={activeTab.cwd}
       />
     );
   };
@@ -710,6 +1142,30 @@ const TerminalView: React.FC = () => {
               </div>
             </button>
 
+            {/* Import SSH Config */}
+            <button
+              onClick={() => {
+                const fileInput = document.getElementById('ssh-config-file-input');
+                fileInput?.click();
+              }}
+              className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-orange-600/10 transition-colors text-left border-b border-neutral-800/50 mb-1"
+            >
+              <Download size={14} className="text-orange-500" />
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-mono text-orange-400">Import SSH Config</div>
+                <div className="text-[10px] font-mono text-neutral-600">
+                  Load connections from ~/.ssh/config
+                </div>
+              </div>
+            </button>
+            <input
+              id="ssh-config-file-input"
+              type="file"
+              accept=".config,config,*"
+              style={{ display: 'none' }}
+              onChange={handleImportSshConfig}
+            />
+
             {/* Saved connections */}
             {connections.map((conn) => (
               <button
@@ -740,229 +1196,338 @@ const TerminalView: React.FC = () => {
     );
   };
 
-  // ─── Main render ───────────────────────────────────────────
+  const activeTab = tabs.find((t) => t.id === activeTabId);
 
   return (
     <div className="flex flex-col h-[calc(100vh-52px)] bg-neutral-950">
-      {/* Tab bar + toolbar */}
-      {tabs.length > 0 && (
-        <>
-          <TerminalTabBar
-            tabs={tabs}
-            activeTabId={activeTabId}
-            onSelectTab={setActiveTabId}
-            onCloseTab={handleCloseTab}
-            onNewTab={handleNewTab}
-          />
-
-          {/* Toolbar */}
-          <div className="flex items-center justify-between px-3 py-1 bg-neutral-900/30 border-b border-neutral-800/50">
-            <div className="flex items-center gap-1">
-              <button
-                onClick={() => handleSplit('horizontal')}
-                className="p-1.5 text-neutral-500 hover:text-orange-500 hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Split Horizontal"
-                disabled={!activeTabId}
-              >
-                <SplitSquareHorizontal size={13} />
-              </button>
-              <button
-                onClick={() => handleSplit('vertical')}
-                className="p-1.5 text-neutral-500 hover:text-orange-500 hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Split Vertical"
-                disabled={!activeTabId}
-              >
-                <SplitSquareVertical size={13} />
-              </button>
-              {splitMode !== 'none' && (
-                <button
-                  onClick={() => {
-                    setSplitMode('none');
-                    setSplitTabIds(null);
-                  }}
-                  className="p-1.5 text-orange-500 hover:text-orange-400 hover:bg-neutral-800 transition-colors"
-                  title="Exit Split View"
-                >
-                  <X size={13} />
-                </button>
-              )}
-
-              {/* Separator */}
-              <div className="w-px h-4 bg-neutral-800 mx-1" />
-
-              {/* Open File */}
-              <button
-                onClick={() => { setShowPathDialog({ mode: 'open' }); setPathDialogValue(''); setPathDialogUseSudo(false); }}
-                className="p-1.5 text-neutral-500 hover:text-orange-500 hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Open Remote File"
-                disabled={!activeTabId}
-              >
-                <FileSearch size={13} />
-              </button>
-
-              <button
-                onClick={() => { setShowPathDialog({ mode: 'download' }); setPathDialogValue(''); setPathDialogUseSudo(false); }}
-                className="p-1.5 text-neutral-500 hover:text-orange-500 hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Download Remote File"
-                disabled={!activeTabId}
-              >
-                <Download size={13} />
-              </button>
-
-              {/* Separator */}
-              <div className="w-px h-4 bg-neutral-800 mx-1" />
-
-              {/* SFTP File Browser Toggle */}
-              <button
-                onClick={() => setShowSftpPanel(!showSftpPanel)}
-                className={`p-1.5 transition-colors rounded ${showSftpPanel ? 'text-orange-500 bg-neutral-800' : 'text-neutral-500 hover:text-orange-500 hover:bg-neutral-800'} disabled:opacity-50 disabled:cursor-not-allowed`}
-                title={showSftpPanel ? 'Hide File Browser' : 'Show File Browser'}
-                disabled={!activeTabId}
-              >
-                <FolderOpen size={13} />
-              </button>
-            </div>
-
-            <div className="flex items-center gap-2 text-[10px] font-mono text-neutral-600">
-              <span>Ctrl+Shift+T: New</span>
-              <span>|</span>
-              <span>Ctrl+Tab: Switch</span>
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* Terminal area */}
-      <div className="flex-1 overflow-hidden">
-        {showSftpPanel && tabs.length > 0 && getActiveSessionId() ? (
-          <SplitContainer direction="horizontal" initialRatio={0.25}>
-            <SftpFileBrowser
-              sessionId={getActiveSessionId()!}
-              onOpenFile={(remotePath, useSudo) => {
-                const sid = getActiveSessionId();
-                if (sid) {
-                  window.dispatchEvent(new CustomEvent('terminal:open-file', {
-                    detail: { sessionId: sid, remotePath, useSudo }
-                  }));
-                }
-              }}
-              onDownloadFile={(remotePath) => {
-                const sid = getActiveSessionId();
-                if (sid) {
-                  const url = `/api/terminal/sessions/${sid}/download?path=${encodeURIComponent(remotePath)}`;
-                  const a = document.createElement('a');
-                  a.href = url;
-                  a.download = remotePath.split('/').pop() || 'file';
-                  document.body.appendChild(a);
-                  a.click();
-                  document.body.removeChild(a);
-                }
-              }}
-            />
-            {renderTerminalArea()}
-          </SplitContainer>
-        ) : (
-          renderTerminalArea()
-        )}
+      {/* Sub-navigation bar */}
+      <div className="flex bg-[#0d0e12] border-b border-neutral-900 px-4 py-2.5 gap-6 select-none shrink-0">
+        <button
+          onClick={() => setSubSection('terminals')}
+          className={`text-[10px] font-bold uppercase tracking-widest font-mono transition-all pb-1 ${
+            subSection === 'terminals' ? 'text-orange-500 border-b border-orange-500' : 'text-neutral-500 hover:text-neutral-300'
+          }`}
+        >
+          Active Terminals
+        </button>
+        <button
+          onClick={() => setSubSection('portForwards')}
+          className={`text-[10px] font-bold uppercase tracking-widest font-mono transition-all pb-1 ${
+            subSection === 'portForwards' ? 'text-orange-500 border-b border-orange-500' : 'text-neutral-500 hover:text-neutral-300'
+          }`}
+        >
+          Port Forwarding
+        </button>
+        <button
+          onClick={() => setSubSection('keys')}
+          className={`text-[10px] font-bold uppercase tracking-widest font-mono transition-all pb-1 ${
+            subSection === 'keys' ? 'text-orange-500 border-b border-orange-500' : 'text-neutral-500 hover:text-neutral-300'
+          }`}
+        >
+          SSH Key Manager
+        </button>
       </div>
 
-      {/* Modals */}
-      {renderConnectionPicker()}
-      {renderQuickConnectModal()}
+      {subSection === 'terminals' ? (
+        <div className="flex flex-col flex-1 overflow-hidden">
+          {/* Tab bar + toolbar */}
+          {tabs.length > 0 && (
+            <>
+              <TerminalTabBar
+                tabs={tabs}
+                activeTabId={activeTabId}
+                onSelectTab={setActiveTabId}
+                onCloseTab={handleCloseTab}
+                onNewTab={handleNewTab}
+                onUpdateTabColor={handleUpdateTabColor}
+                onRenameTab={handleRenameTab}
+              />
 
-      {/* Path Dialog for Download / Open File */}
-      {showPathDialog && (
-        <div className="fixed inset-0 bg-neutral-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-neutral-900 border border-neutral-800 w-full max-w-md">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800">
-              <div className="flex items-center gap-2">
-                {showPathDialog.mode === 'download' ? (
-                  <Download size={14} className="text-orange-500" />
-                ) : (
-                  <FileSearch size={14} className="text-orange-500" />
-                )}
-                <span className="text-xs font-mono uppercase tracking-wider text-neutral-200">
-                  {showPathDialog.mode === 'download' ? 'Download Remote File' : 'Open Remote File'}
-                </span>
+              {/* Toolbar */}
+              <div className="flex items-center justify-between px-3 py-1 bg-neutral-900/30 border-b border-neutral-800/50">
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => handleSplit('horizontal')}
+                    className="p-1.5 text-neutral-500 hover:text-orange-500 hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Split Horizontal"
+                    disabled={!activeTabId}
+                  >
+                    <SplitSquareHorizontal size={13} />
+                  </button>
+                  <button
+                    onClick={() => handleSplit('vertical')}
+                    className="p-1.5 text-neutral-500 hover:text-orange-500 hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Split Vertical"
+                    disabled={!activeTabId}
+                  >
+                    <SplitSquareVertical size={13} />
+                  </button>
+                  {splitMode !== 'none' && (
+                    <button
+                      onClick={() => {
+                        setSplitMode('none');
+                        setSplitTabIds(null);
+                      }}
+                      className="p-1.5 text-orange-500 hover:text-orange-400 hover:bg-neutral-800 transition-colors"
+                      title="Exit Split View"
+                    >
+                      <X size={13} />
+                    </button>
+                  )}
+
+                  {/* Separator */}
+                  <div className="w-px h-4 bg-neutral-800 mx-1" />
+
+                  {/* Open File */}
+                  <button
+                    onClick={() => { setShowPathDialog({ mode: 'open' }); setPathDialogValue(''); setPathDialogUseSudo(false); }}
+                    className="p-1.5 text-neutral-500 hover:text-orange-500 hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Open Remote File"
+                    disabled={!activeTabId}
+                  >
+                    <FileSearch size={13} />
+                  </button>
+
+                  <button
+                    onClick={() => { setShowPathDialog({ mode: 'download' }); setPathDialogValue(''); setPathDialogUseSudo(false); }}
+                    className="p-1.5 text-neutral-500 hover:text-orange-500 hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Download Remote File"
+                    disabled={!activeTabId}
+                  >
+                    <Download size={13} />
+                  </button>
+
+                  {/* Separator */}
+                  <div className="w-px h-4 bg-neutral-800 mx-1" />
+
+                  {/* SFTP File Browser Toggle */}
+                  <button
+                    onClick={() => setShowSftpPanel(!showSftpPanel)}
+                    className={`p-1.5 transition-colors rounded ${showSftpPanel ? 'text-orange-500 bg-neutral-800' : 'text-neutral-500 hover:text-orange-500 hover:bg-neutral-800'} disabled:opacity-50 disabled:cursor-not-allowed`}
+                    title={showSftpPanel ? 'Hide File Browser' : 'Show File Browser'}
+                    disabled={!activeTabId}
+                  >
+                    <FolderOpen size={13} />
+                  </button>
+
+                  {/* Separator */}
+                  <div className="w-px h-4 bg-neutral-800 mx-1" />
+
+                  {/* Clear Scrollback */}
+                  <button
+                    onClick={() => {
+                      const sid = getActiveSessionId();
+                      if (sid) {
+                        window.dispatchEvent(new CustomEvent('terminal:clear-buffer', { detail: { sessionId: sid } }));
+                      }
+                    }}
+                    className="p-1.5 text-neutral-500 hover:text-orange-500 hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Clear Terminal Buffer"
+                    disabled={!activeTabId}
+                  >
+                    <Trash size={13} />
+                  </button>
+
+                  {/* Export Output */}
+                  <button
+                    onClick={() => {
+                      const sid = getActiveSessionId();
+                      if (sid) {
+                        window.dispatchEvent(new CustomEvent('terminal:export-log', { detail: { sessionId: sid, format: 'txt' } }));
+                      }
+                    }}
+                    className="p-1.5 text-neutral-500 hover:text-orange-500 hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Export Scrollback to TXT"
+                    disabled={!activeTabId}
+                  >
+                    <FileText size={13} />
+                  </button>
+                  <button
+                    onClick={() => {
+                      const sid = getActiveSessionId();
+                      if (sid) {
+                        window.dispatchEvent(new CustomEvent('terminal:export-log', { detail: { sessionId: sid, format: 'html' } }));
+                      }
+                    }}
+                    className="p-1.5 text-neutral-500 hover:text-orange-500 hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Export Scrollback to HTML"
+                    disabled={!activeTabId}
+                  >
+                    <Download size={13} />
+                  </button>
+
+                  {/* Separator */}
+                  <div className="w-px h-4 bg-neutral-800 mx-1" />
+
+                  {/* Settings Gear */}
+                  <button
+                    onClick={() => setShowSettingsPanel(!showSettingsPanel)}
+                    className={`p-1.5 transition-colors rounded ${showSettingsPanel ? 'text-orange-500 bg-neutral-800' : 'text-neutral-500 hover:text-orange-500 hover:bg-neutral-800'} disabled:opacity-50 disabled:cursor-not-allowed`}
+                    title="Terminal Settings"
+                    disabled={!activeTabId}
+                  >
+                    <Settings size={13} />
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2 text-[10px] font-mono text-neutral-600">
+                  <span>Ctrl+Shift+T: New</span>
+                  <span>|</span>
+                  <span>Ctrl+Tab: Switch</span>
+                </div>
               </div>
-              <button
-                onClick={() => setShowPathDialog(null)}
-                className="text-neutral-500 hover:text-neutral-300"
-              >
-                <X size={14} />
-              </button>
-            </div>
+            </>
+          )}
 
-            <div className="p-4 space-y-3">
-              <div>
-                <label className="block text-[10px] font-mono text-neutral-500 uppercase mb-1">
-                  Remote File Path
-                </label>
-                <input
-                  type="text"
-                  value={pathDialogValue}
-                  onChange={(e) => setPathDialogValue(e.target.value)}
-                  placeholder="/path/to/file or relative/path"
-                  className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-xs font-mono text-neutral-200 placeholder-neutral-600 focus:outline-none focus:border-orange-500"
-                  autoFocus
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && pathDialogValue.trim()) {
+          {/* Terminal area */}
+          <div className="flex-1 overflow-hidden flex relative">
+            <div className="flex-1 h-full overflow-hidden relative">
+              {showSftpPanel && tabs.length > 0 && getActiveSessionId() ? (
+                <SplitContainer direction="horizontal" initialRatio={0.25}>
+                  <SftpFileBrowser
+                    sessionId={getActiveSessionId()!}
+                    connectionId={activeTab?.connectionId}
+                    onOpenFile={(remotePath, useSudo) => {
+                      const sid = getActiveSessionId();
+                      if (sid) {
+                        window.dispatchEvent(new CustomEvent('terminal:open-file', {
+                          detail: { sessionId: sid, remotePath, useSudo }
+                        }));
+                      }
+                    }}
+                    onDownloadFile={(remotePath) => {
+                      const sid = getActiveSessionId();
+                      if (sid) {
+                        const url = `/api/terminal/sessions/${sid}/download?path=${encodeURIComponent(remotePath)}`;
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = remotePath.split('/').pop() || 'file';
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                      }
+                    }}
+                  />
+                  {renderTerminalArea()}
+                </SplitContainer>
+              ) : (
+                renderTerminalArea()
+              )}
+            </div>
+            {showSettingsPanel && (
+              <div className="w-80 h-full border-l border-neutral-800 bg-neutral-900/90 backdrop-blur-md z-30 flex flex-col animate-in slide-in-from-right duration-200">
+                {renderSettingsDrawer()}
+              </div>
+            )}
+          </div>
+
+          {/* Modals */}
+          {renderConnectionPicker()}
+          {renderQuickConnectModal()}
+
+          {/* Path Dialog for Download / Open File */}
+          {showPathDialog && (
+            <div className="fixed inset-0 bg-neutral-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div className="bg-neutral-900 border border-neutral-800 w-full max-w-md">
+                <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800">
+                  <div className="flex items-center gap-2">
+                    {showPathDialog.mode === 'download' ? (
+                      <Download size={14} className="text-orange-500" />
+                    ) : (
+                      <FileSearch size={14} className="text-orange-500" />
+                    )}
+                    <span className="text-xs font-mono uppercase tracking-wider text-neutral-200">
+                      {showPathDialog.mode === 'download' ? 'Download Remote File' : 'Open Remote File'}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => setShowPathDialog(null)}
+                    className="text-neutral-500 hover:text-neutral-300"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+
+                <div className="p-4 space-y-3">
+                  <div>
+                    <label className="block text-[10px] font-mono text-neutral-500 uppercase mb-1">
+                      Remote File Path
+                    </label>
+                    <input
+                      type="text"
+                      value={pathDialogValue}
+                      onChange={(e) => setPathDialogValue(e.target.value)}
+                      placeholder="/path/to/file or relative/path"
+                      className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-xs font-mono text-neutral-200 placeholder-neutral-600 focus:outline-none focus:border-orange-500"
+                      autoFocus
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && pathDialogValue.trim()) {
+                          if (showPathDialog.mode === 'download') {
+                            handleToolbarDownload(pathDialogValue);
+                          } else {
+                            handleToolbarOpenFile(pathDialogValue);
+                          }
+                        }
+                      }}
+                    />
+                    <p className="text-[10px] font-mono text-neutral-600 mt-1.5">
+                      Nhập đường dẫn tương đối (relative) hoặc tuyệt đối (absolute) trên server
+                    </p>
+                    {showPathDialog.mode === 'open' && (
+                      <label className="flex items-center gap-1.5 text-[11px] font-mono text-neutral-400 hover:text-neutral-200 cursor-pointer select-none mt-2">
+                        <input
+                          type="checkbox"
+                          checked={pathDialogUseSudo}
+                          onChange={(e) => setPathDialogUseSudo(e.target.checked)}
+                          className="accent-orange-500 rounded bg-neutral-950 border-neutral-800 focus:ring-0 focus:ring-offset-0"
+                        />
+                        <span className="text-orange-500 font-bold">Mở bằng SUDO</span>
+                      </label>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-800">
+                  <button
+                    onClick={() => setShowPathDialog(null)}
+                    className="px-4 py-2 text-xs font-mono text-neutral-400 hover:text-neutral-200 border border-neutral-800 hover:border-neutral-700"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => {
                       if (showPathDialog.mode === 'download') {
                         handleToolbarDownload(pathDialogValue);
                       } else {
                         handleToolbarOpenFile(pathDialogValue);
                       }
-                    }
-                  }}
-                />
-                <p className="text-[10px] font-mono text-neutral-600 mt-1.5">
-                  Nhập đường dẫn tương đối (relative) hoặc tuyệt đối (absolute) trên server
-                </p>
-                {showPathDialog.mode === 'open' && (
-                  <label className="flex items-center gap-1.5 text-[11px] font-mono text-neutral-400 hover:text-neutral-200 cursor-pointer select-none mt-2">
-                    <input
-                      type="checkbox"
-                      checked={pathDialogUseSudo}
-                      onChange={(e) => setPathDialogUseSudo(e.target.checked)}
-                      className="accent-orange-500 rounded bg-neutral-950 border-neutral-800 focus:ring-0 focus:ring-offset-0"
-                    />
-                    <span className="text-orange-500 font-bold">Mở bằng SUDO</span>
-                  </label>
-                )}
+                    }}
+                    disabled={!pathDialogValue.trim() || pathDialogLoading}
+                    className="flex items-center gap-2 px-4 py-2 text-xs font-mono font-bold uppercase bg-orange-600 hover:bg-orange-500 text-black border border-orange-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {pathDialogLoading ? (
+                      <>
+                        <Loader2 size={12} className="animate-spin" />
+                        Processing...
+                      </>
+                    ) : showPathDialog.mode === 'download' ? (
+                      'Download'
+                    ) : (
+                      'Open'
+                    )}
+                  </button>
+                </div>
               </div>
             </div>
-
-            <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-800">
-              <button
-                onClick={() => setShowPathDialog(null)}
-                className="px-4 py-2 text-xs font-mono text-neutral-400 hover:text-neutral-200 border border-neutral-800 hover:border-neutral-700"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  if (showPathDialog.mode === 'download') {
-                    handleToolbarDownload(pathDialogValue);
-                  } else {
-                    handleToolbarOpenFile(pathDialogValue);
-                  }
-                }}
-                disabled={!pathDialogValue.trim() || pathDialogLoading}
-                className="flex items-center gap-2 px-4 py-2 text-xs font-mono font-bold uppercase bg-orange-600 hover:bg-orange-500 text-black border border-orange-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {pathDialogLoading ? (
-                  <>
-                    <Loader2 size={12} className="animate-spin" />
-                    Processing...
-                  </>
-                ) : showPathDialog.mode === 'download' ? (
-                  'Download'
-                ) : (
-                  'Open'
-                )}
-              </button>
-            </div>
-          </div>
+          )}
+        </div>
+      ) : subSection === 'portForwards' ? (
+        <div className="flex-1 overflow-auto p-6 bg-[#090a0f]">
+          <PortForwardDashboard />
+        </div>
+      ) : (
+        <div className="flex-1 overflow-auto p-6 bg-[#090a0f]">
+          <SSHKeyManager />
         </div>
       )}
     </div>

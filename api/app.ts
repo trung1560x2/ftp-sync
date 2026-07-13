@@ -22,6 +22,9 @@ import contentDiffRoutes from './routes/contentDiff.js'
 import aiRoutes from './routes/ai.js'
 import terminalRoutes from './routes/terminal.js'
 import settingsRoutes from './routes/settings.js'
+import sshKeyRoutes from './routes/ssh-keys.js'
+import portForwardRoutes from './routes/port-forwards.js'
+import terminalConfigRoutes from './routes/terminal-config.js'
 import { logStore } from './services/LogStore.js'
 import { requireAuth } from './middleware/auth.js'
 
@@ -38,7 +41,7 @@ app.use(cors())
 app.use((_req, res, next) => {
   res.setHeader(
     'Content-Security-Policy',
-    "default-src 'self' http://127.0.0.1:* ws://127.0.0.1:*; script-src 'self' 'unsafe-inline' 'unsafe-eval' vs:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:;"
+    "default-src 'self' http://127.0.0.1:* ws://127.0.0.1:*; script-src 'self' 'unsafe-inline' 'unsafe-eval' vs:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*;"
   );
   next();
 })
@@ -80,6 +83,9 @@ app.use('/api/content-diff', contentDiffRoutes)
 app.use('/api/ai', aiRoutes)
 app.use('/api/terminal', terminalRoutes)
 app.use('/api/settings', settingsRoutes)
+app.use('/api/ssh-keys', requireAuth, sshKeyRoutes)
+app.use('/api/port-forwards', requireAuth, portForwardRoutes)
+app.use('/api/terminal-config', requireAuth, terminalConfigRoutes)
 
 
 /**
@@ -139,6 +145,16 @@ const originalListen = app.listen.bind(app);
 app.listen = function (...args: any[]) {
   const server = originalListen(...args);
   webSocketService.init(server);
+  
+  // Auto-start active port forwards on server startup
+  import('./services/PortForwardService.js').then(({ portForwardService }) => {
+    portForwardService.init().catch((err: any) => {
+      console.error('Failed to auto-start port forwards:', err.message);
+    });
+  }).catch((err) => {
+    console.error('Failed to load PortForwardService:', err);
+  });
+
   return server;
 } as any;
 

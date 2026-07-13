@@ -16,6 +16,8 @@ import {
   Eye,
   EyeOff,
   AlertCircle,
+  Search,
+  Database,
 } from 'lucide-react';
 
 interface FileItem {
@@ -28,12 +30,14 @@ interface FileItem {
 
 interface SftpFileBrowserProps {
   sessionId: string;
+  connectionId?: number;
   onOpenFile?: (remotePath: string, useSudo?: boolean) => void;
   onDownloadFile?: (remotePath: string) => void;
 }
 
 const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
   sessionId,
+  connectionId,
   onOpenFile,
   onDownloadFile,
 }) => {
@@ -59,7 +63,6 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
   // Rename state
   const [renaming, setRenaming] = useState<{ item: FileItem; fullPath: string } | null>(null);
   const [renameValue, setRenameValue] = useState('');
-  const [renameLoading, setRenameLoading] = useState(false);
 
   // Delete confirm
   const [deleteConfirm, setDeleteConfirm] = useState<{ item: FileItem; fullPath: string } | null>(null);
@@ -70,6 +73,16 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
   const dragCounter = useRef(0);
 
+  // Search state
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchContent, setSearchContent] = useState(false);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState<FileItem[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [reindexing, setReindexing] = useState(false);
+  const [targetDirectory, setTargetDirectory] = useState('/');
+
   const containerRef = useRef<HTMLDivElement>(null);
 
   const formatBytes = (bytes: number): string => {
@@ -78,17 +91,6 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-  };
-
-  const formatDate = (iso: string): string => {
-    try {
-      const d = new Date(iso);
-      if (d.getFullYear() < 1980) return '—';
-      return d.toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: '2-digit' }) +
-        ' ' + d.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
-    } catch {
-      return '—';
-    }
   };
 
   const joinPath = (base: string, name: string): string => {
@@ -106,14 +108,30 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
       setItems(data.items || []);
       setCurrentPath(data.path || dirPath);
       return true;
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
       setItems([]);
       return false;
     } finally {
       setLoading(false);
     }
   }, [sessionId]);
+
+  // Fetch target directory configuration
+  useEffect(() => {
+    if (!connectionId) return;
+    fetch(`/api/ftp-connections`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (Array.isArray(data)) {
+          const conn = data.find((c: { id: number; target_directory?: string }) => c.id === connectionId);
+          if (conn && conn.target_directory) {
+            setTargetDirectory(conn.target_directory);
+          }
+        }
+      })
+      .catch((err) => console.error('Failed to fetch connection config', err));
+  }, [connectionId]);
 
   // Initial load — start from home/CWD
   useEffect(() => {
@@ -145,8 +163,70 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
     navigateTo(parent);
   };
 
+  const handleSearch = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!searchQuery.trim() || !connectionId) return;
+    setSearchLoading(true);
+    setError('');
+    setIsSearching(true);
+    try {
+      const res = await fetch(`/api/files/search/${connectionId}?q=${encodeURIComponent(searchQuery.trim())}&content=${searchContent}`);
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Failed to search files');
+      
+      const mappedResults: FileItem[] = (data.results || []).map((r: { relPath: string; isDirectory: number | boolean; size?: number; modifiedAt?: string }) => ({
+        name: r.relPath,
+        isDirectory: r.isDirectory === 1 || r.isDirectory === true,
+        size: r.size || 0,
+        modifiedAt: r.modifiedAt || '',
+        permissions: ''
+      }));
+      setSearchResults(mappedResults);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+      setSearchResults([]);
+    } finally {
+      setSearchLoading(false);
+    }
+  };
+
+  const handleReindex = async () => {
+    if (!connectionId) return;
+    setReindexing(true);
+    setError('');
+    try {
+      const res = await fetch(`/api/files/search/reindex/${connectionId}`, { method: 'POST' });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Failed to reindex files');
+      alert(`Đã lập chỉ mục xong ${data.count} file remote!`);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReindexing(false);
+    }
+  };
+
+  const clearSearch = () => {
+    setIsSearching(false);
+    setSearchQuery('');
+    setSearchResults([]);
+  };
+
   // Double-click handler
   const handleDoubleClick = (item: FileItem) => {
+    if (isSearching) {
+      const fullPath = targetDirectory.endsWith('/') 
+        ? targetDirectory + item.name 
+        : targetDirectory + '/' + item.name;
+      if (item.isDirectory) {
+        navigateTo(fullPath);
+        clearSearch();
+      } else {
+        onOpenFile?.(fullPath);
+      }
+      return;
+    }
+
     const fullPath = joinPath(currentPath, item.name);
     if (item.isDirectory) {
       navigateTo(fullPath);
@@ -207,8 +287,8 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
       setShowNewFolder(false);
       setNewFolderName('');
       fetchDir(currentPath);
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setNewFolderLoading(false);
     }
@@ -217,7 +297,6 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
   // Rename
   const handleRename = async () => {
     if (!renaming || !renameValue.trim()) return;
-    setRenameLoading(true);
     try {
       const newPath = joinPath(currentPath, renameValue.trim());
       const res = await fetch(`/api/terminal/sessions/${sessionId}/rename`, {
@@ -230,10 +309,8 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
       setRenaming(null);
       setRenameValue('');
       fetchDir(currentPath);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setRenameLoading(false);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -251,8 +328,8 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
       if (!data.success) throw new Error(data.message);
       setDeleteConfirm(null);
       fetchDir(currentPath);
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setDeleteLoading(false);
     }
@@ -311,8 +388,8 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
         fetchDir(currentPath);
         setUploadProgress(null);
       }, 1500);
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
       setUploadProgress(null);
     }
   };
@@ -321,6 +398,8 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
   const filteredItems = items
     .filter((i) => i.name !== '.' && i.name !== '..')
     .filter((i) => showHidden || !i.name.startsWith('.'));
+
+  const displayItems = isSearching ? searchResults : filteredItems;
 
   // Breadcrumb segments
   const pathSegments = currentPath.split('/').filter(Boolean);
@@ -339,7 +418,7 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
         <button
           onClick={goUp}
           disabled={currentPath === '/'}
-          className="p-1 text-neutral-500 hover:text-orange-500 hover:bg-neutral-800 transition-colors disabled:opacity-30 disabled:cursor-not-allowed rounded"
+          className="p-1 text-neutral-500 hover:text-orange-500 hover:bg-neutral-800 transition-colors disabled:opacity-30 disabled:cursor-not-allowed rounded animate-duration-100"
           title="Go up"
         >
           <ArrowUp size={13} />
@@ -365,6 +444,23 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
         >
           {showHidden ? <Eye size={12} /> : <EyeOff size={12} />}
         </button>
+        <button
+          onClick={() => setShowSearch(!showSearch)}
+          className={`p-1 transition-colors rounded ${showSearch ? 'text-orange-500 bg-neutral-800' : 'text-neutral-500 hover:text-orange-500 hover:bg-neutral-800'}`}
+          title={showSearch ? 'Close search' : 'Search files'}
+        >
+          <Search size={12} />
+        </button>
+        {connectionId && (
+          <button
+            onClick={handleReindex}
+            disabled={reindexing}
+            className={`p-1 transition-colors rounded text-neutral-500 hover:text-orange-500 hover:bg-neutral-800 disabled:opacity-30`}
+            title="Rebuild index cache"
+          >
+            <Database size={12} className={reindexing ? 'animate-spin text-orange-500' : ''} />
+          </button>
+        )}
       </div>
 
       {/* Breadcrumb */}
@@ -468,6 +564,55 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
         </div>
       )}
 
+      {/* Search Bar Panel */}
+      {showSearch && (
+        <form
+          onSubmit={handleSearch}
+          className="flex flex-col gap-1.5 p-2 border-b border-neutral-800/50 bg-neutral-900/30 flex-shrink-0"
+        >
+          <div className="flex items-center gap-1.5">
+            <div className="relative flex-1">
+              <Search size={10} className="absolute left-2 top-1/2 -translate-y-1/2 text-neutral-600" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search remote files..."
+                className="w-full pl-6 pr-2 py-0.5 bg-neutral-950 border border-neutral-800 rounded text-[10px] font-mono text-neutral-200 placeholder-neutral-600 focus:outline-none focus:border-orange-500"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={searchLoading || !searchQuery.trim()}
+              className="px-2.5 py-0.5 text-[10px] font-mono font-bold bg-orange-600 hover:bg-orange-500 text-black rounded transition-colors disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer flex-shrink-0"
+            >
+              {searchLoading ? <Loader2 size={10} className="animate-spin" /> : 'Search'}
+            </button>
+            {isSearching && (
+              <button
+                type="button"
+                onClick={clearSearch}
+                className="p-1 text-neutral-500 hover:text-neutral-300 transition-colors rounded border border-neutral-800 bg-neutral-900 flex-shrink-0"
+                title="Clear search results"
+              >
+                <X size={10} />
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-2 text-[9px] text-neutral-500 font-sans">
+            <label className="flex items-center gap-1 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={searchContent}
+                onChange={(e) => setSearchContent(e.target.checked)}
+                className="rounded border-neutral-800 bg-neutral-950 text-orange-500 focus:ring-0 focus:ring-offset-0 w-3 h-3 cursor-pointer"
+              />
+              Search content (Slow for FTP)
+            </label>
+          </div>
+        </form>
+      )}
+
       {/* New Folder Inline Input */}
       {showNewFolder && (
         <div className="flex items-center gap-1 px-2 py-1.5 border-b border-neutral-800/50 bg-neutral-900/80">
@@ -517,13 +662,19 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
           <div className="flex items-center justify-center h-full">
             <Loader2 size={20} className="text-orange-500 animate-spin" />
           </div>
-        ) : filteredItems.length === 0 ? (
+        ) : searchLoading ? (
+          <div className="flex items-center justify-center h-full">
+            <Loader2 size={20} className="text-orange-500 animate-spin" />
+          </div>
+        ) : displayItems.length === 0 ? (
           <div className="flex items-center justify-center h-full text-neutral-600 text-[11px] font-mono">
-            Empty directory
+            {isSearching ? 'No search results found' : 'Empty directory'}
           </div>
         ) : (
-          filteredItems.map((item) => {
+          displayItems.map((item) => {
             const isRenaming = renaming?.item.name === item.name;
+            const displayName = isSearching ? item.name.split('/').pop() || item.name : item.name;
+            const subPath = isSearching ? item.name.substring(0, item.name.lastIndexOf('/')) : '';
             return (
               <div
                 key={item.name}
@@ -556,10 +707,15 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
                   <span
                     className={`flex-1 min-w-0 text-[11px] font-mono truncate ${
                       item.isDirectory ? 'text-neutral-200' : 'text-neutral-400'
-                    } ${item.name.startsWith('.') ? 'opacity-60' : ''}`}
+                    } ${!isSearching && item.name.startsWith('.') ? 'opacity-60' : ''}`}
                     title={item.name}
                   >
-                    {item.name}
+                    {displayName}
+                    {subPath && (
+                      <span className="text-[9px] text-neutral-600 ml-2 font-sans font-normal">
+                        in {subPath}
+                      </span>
+                    )}
                   </span>
                 )}
 
@@ -571,15 +727,17 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
                 )}
 
                 {/* Actions on hover */}
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleContextMenu(e as any, item);
-                  }}
-                  className="opacity-0 group-hover:opacity-100 p-0.5 text-neutral-600 hover:text-orange-500 transition-all flex-shrink-0"
-                >
-                  <MoreVertical size={11} />
-                </button>
+                {!isSearching && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleContextMenu(e as unknown as React.MouseEvent, item);
+                    }}
+                    className="opacity-0 group-hover:opacity-100 p-0.5 text-neutral-600 hover:text-orange-500 transition-all flex-shrink-0"
+                  >
+                    <MoreVertical size={11} />
+                  </button>
+                )}
               </div>
             );
           })
@@ -589,10 +747,10 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
       {/* Footer */}
       <div className="flex items-center justify-between px-2 py-1 border-t border-neutral-800/50 bg-neutral-900/30 flex-shrink-0">
         <span className="text-[9px] font-mono text-neutral-600 truncate" title={currentPath}>
-          {currentPath}
+          {isSearching ? 'Search results' : currentPath}
         </span>
         <span className="text-[9px] font-mono text-neutral-600 flex-shrink-0">
-          {filteredItems.length} items
+          {displayItems.length} items
         </span>
       </div>
 

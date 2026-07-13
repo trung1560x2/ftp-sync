@@ -47,10 +47,10 @@ router.post('/check-path', async (req: Request, res: Response) => {
 
 // Create new connection
 router.post('/', async (req: Request, res: Response) => {
-  const { name, server, port, username, password, targetDirectory, localPath, backupPath, syncMode, secure, syncDeletions, parallelConnections, bufferSize, protocol, privateKey, excludePaths, conflictResolution, validationStatus, validationMessage } = req.body;
+  const { name, server, port, username, password, targetDirectory, localPath, backupPath, syncMode, secure, syncDeletions, parallelConnections, bufferSize, protocol, privateKey, sshKeyId, excludePaths, conflictResolution, validationStatus, validationMessage, enableChecksum } = req.body;
 
-  if (!server || !username || (!password && !privateKey)) {
-    return res.status(400).json({ error: 'Server, username and password/key are required' });
+  if (!server || !username || (!password && !privateKey && !sshKeyId)) {
+    return res.status(400).json({ error: 'Server, username and authentication credentials are required' });
   }
 
   try {
@@ -58,8 +58,8 @@ router.post('/', async (req: Request, res: Response) => {
     const passwordEncrypted = password ? encrypt(password) : '';
 
     const result = await db.run(
-      `INSERT INTO ftp_connections (name, server, port, username, password_hash, target_directory, local_path, backup_path, sync_mode, secure, sync_deletions, parallel_connections, buffer_size, protocol, private_key, exclude_paths, conflict_resolution, validation_status, validation_message) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO ftp_connections (name, server, port, username, password_hash, target_directory, local_path, backup_path, sync_mode, secure, sync_deletions, parallel_connections, buffer_size, protocol, private_key, ssh_key_id, exclude_paths, conflict_resolution, validation_status, validation_message, enable_checksum) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         name || null,
         server,
@@ -76,10 +76,12 @@ router.post('/', async (req: Request, res: Response) => {
         bufferSize || 16,
         protocol || 'ftp',
         privateKey || null,
+        sshKeyId || null,
         excludePaths || '',
         conflictResolution || 'overwrite',
         validationStatus || 'unverified',
-        validationMessage || null
+        validationMessage || null,
+        enableChecksum ? 1 : 0
       ]
     );
 
@@ -101,7 +103,8 @@ router.post('/', async (req: Request, res: Response) => {
       privateKey,
       conflictResolution: conflictResolution || 'overwrite',
       validationStatus: validationStatus || 'unverified',
-      validationMessage: validationMessage || null
+      validationMessage: validationMessage || null,
+      enableChecksum: enableChecksum ? 1 : 0
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -116,7 +119,7 @@ router.put('/:id', async (req: Request, res: Response) => {
   const { password: _, ...logBody } = req.body;
   console.log('PUT /ftp-connections/:id body:', { ...logBody, password: req.body.password ? '******' : undefined });
 
-  const { name, server, port, username, password, targetDirectory, localPath, backupPath, syncMode, secure, syncDeletions, parallelConnections, bufferSize, protocol, privateKey, excludePaths, conflictResolution, validationStatus, validationMessage } = req.body;
+  const { name, server, port, username, password, targetDirectory, localPath, backupPath, syncMode, secure, syncDeletions, parallelConnections, bufferSize, protocol, privateKey, sshKeyId, excludePaths, conflictResolution, validationStatus, validationMessage, enableChecksum } = req.body;
 
   try {
     const db = await getDb();
@@ -144,9 +147,14 @@ router.put('/:id', async (req: Request, res: Response) => {
       }
     }
 
+    let sshKeyIdVal = existing.ssh_key_id;
+    if (sshKeyId !== undefined) {
+      sshKeyIdVal = sshKeyId || null;
+    }
+
     await db.run(
       `UPDATE ftp_connections 
-       SET name = ?, server = ?, port = ?, username = ?, password_hash = ?, target_directory = ?, local_path = ?, backup_path = ?, sync_mode = ?, secure = ?, sync_deletions = ?, parallel_connections = ?, buffer_size = ?, protocol = ?, private_key = ?, exclude_paths = ?, conflict_resolution = ?, validation_status = ?, validation_message = ?, updated_at = CURRENT_TIMESTAMP 
+       SET name = ?, server = ?, port = ?, username = ?, password_hash = ?, target_directory = ?, local_path = ?, backup_path = ?, sync_mode = ?, secure = ?, sync_deletions = ?, parallel_connections = ?, buffer_size = ?, protocol = ?, private_key = ?, ssh_key_id = ?, exclude_paths = ?, conflict_resolution = ?, validation_status = ?, validation_message = ?, enable_checksum = ?, updated_at = CURRENT_TIMESTAMP 
        WHERE id = ?`,
       [
         name !== undefined ? name : existing.name,
@@ -164,10 +172,12 @@ router.put('/:id', async (req: Request, res: Response) => {
         bufferSize !== undefined ? bufferSize : (existing.buffer_size || 16),
         protocol || existing.protocol || 'ftp',
         privateKeyVal,
+        sshKeyIdVal,
         excludePaths !== undefined ? excludePaths : (existing.exclude_paths || ''),
         conflictResolution || existing.conflict_resolution || 'overwrite',
         validationStatus !== undefined ? validationStatus : existing.validation_status,
         validationMessage !== undefined ? validationMessage : existing.validation_message,
+        enableChecksum !== undefined ? (enableChecksum ? 1 : 0) : existing.enable_checksum,
         id
       ]
     );
@@ -204,13 +214,25 @@ import { TransferClientFactory } from '../services/transfer/TransferClientFactor
 
 // Test connection
 router.post('/test', async (req: Request, res: Response) => {
-  let { server, port, username, password, id, secure, protocol, privateKey } = req.body;
+  let { server, port, username, password, id, secure, protocol, privateKey, sshKeyId } = req.body;
   let finalPassword = password;
+
+  if (sshKeyId) {
+    try {
+      const { sshKeyService } = await import('../services/SSHKeyService.js');
+      const key = await sshKeyService.getKeyById(parseInt(sshKeyId));
+      if (key) {
+        privateKey = key.privateKey;
+      }
+    } catch (err: any) {
+      console.error('Failed to load test SSH key:', err);
+    }
+  }
 
   if (id && !password && !privateKey) {
     try {
       const db = await getDb();
-      const conn = await db.get('SELECT server, port, username, password_hash, secure, protocol, private_key FROM ftp_connections WHERE id = ?', id);
+      const conn = await db.get('SELECT server, port, username, password_hash, secure, protocol, private_key, ssh_key_id FROM ftp_connections WHERE id = ?', id);
       if (!conn) return res.status(404).json({ error: 'Connection not found' });
 
       if (conn.password_hash) {

@@ -12,6 +12,7 @@ import SyncManager from '../services/SyncService.js';
 import { TransferClientFactory } from '../services/transfer/TransferClientFactory.js';
 import { TransferClient } from '../services/transfer/TransferClient.js';
 import { scanRemote, scanLocal, scanLocalCached, calculateDiff } from '../services/DiffScanner.js';
+import RemoteSearchService from '../services/RemoteSearchService.js';
 
 const execFileAsync = util.promisify(execFile);
 
@@ -133,6 +134,107 @@ router.get('/ftp/:id', async (req: Request, res: Response) => {
     }, true); // isInteractive = true
 
     res.json({ files, currentPath: targetDir });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get Remote File Content
+router.get('/remote-content/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const filePath = req.query.path as string;
+  if (!filePath) return res.status(400).json({ error: 'Missing path query parameter' });
+
+  try {
+    const result = await SyncManager.getRemoteFile(parseInt(id), filePath);
+    res.json({ success: true, ...result });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Preview Remote File (Stream directly)
+router.get('/remote-preview/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const filePath = req.query.path as string;
+  if (!filePath) return res.status(400).json({ error: 'Missing path query parameter' });
+
+  try {
+    const connectionId = parseInt(id);
+    const ext = path.extname(filePath).toLowerCase();
+    const mimeTypes: { [key: string]: string } = {
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif',
+      '.svg': 'image/svg+xml',
+      '.webp': 'image/webp',
+      '.pdf': 'application/pdf',
+      '.mp4': 'video/mp4',
+      '.webm': 'video/webm',
+      '.mp3': 'audio/mpeg',
+      '.wav': 'audio/wav',
+      '.txt': 'text/plain',
+      '.log': 'text/plain',
+      '.json': 'application/json',
+    };
+    const contentType = mimeTypes[ext] || 'application/octet-stream';
+    res.setHeader('Content-Type', contentType);
+
+    await SyncManager.runWithClient(connectionId, async (client) => {
+      await client.downloadTo(res, filePath);
+    }, true);
+  } catch (error: any) {
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+});
+
+// Save Remote File Content
+router.post('/remote-content/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { path: filePath, content, lastModifiedAt } = req.body;
+  if (!filePath) return res.status(400).json({ error: 'Missing path parameter' });
+  if (content === undefined) return res.status(400).json({ error: 'Missing content parameter' });
+
+  try {
+    const result = await SyncManager.saveRemoteFile(parseInt(id), filePath, content, lastModifiedAt);
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Search Remote Files
+router.get('/search/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const query = req.query.q as string;
+  const content = req.query.content === 'true';
+
+  if (!query) {
+    return res.status(400).json({ error: 'Query parameter q is required' });
+  }
+
+  try {
+    const results = await RemoteSearchService.search(parseInt(id), query, content);
+    res.json({ success: true, results });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Rebuild Remote File Index Cache
+router.post('/search/reindex/:id', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  try {
+    const db = await getDb();
+    const config = await db.get('SELECT * FROM ftp_connections WHERE id = ?', id);
+    if (!config) return res.status(404).json({ error: 'Connection not found' });
+
+    const targetDir = config.target_directory || '/';
+    const count = await RemoteSearchService.buildCache(parseInt(id), targetDir);
+    res.json({ success: true, count });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

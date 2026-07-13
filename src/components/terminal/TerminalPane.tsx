@@ -3,9 +3,14 @@ import { Terminal } from 'xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
+import { WebglAddon } from '@xterm/addon-webgl';
+import { CanvasAddon } from '@xterm/addon-canvas';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
+import { LigaturesAddon } from '@xterm/addon-ligatures';
 import 'xterm/css/xterm.css';
-import { UploadCloud, CheckCircle2, AlertCircle, Loader2, X, Edit, FileText, Save, Copy, Clipboard, Trash2, Download } from 'lucide-react';
-import Editor from '@monaco-editor/react';
+import { UploadCloud, CheckCircle2, AlertCircle, Loader2, X, Edit, Copy, Clipboard, Trash2, Download } from 'lucide-react';
+import RemoteFileEditor from '../RemoteFileEditor';
+import { useTerminalSettings, TERMINAL_THEMES } from '../../stores/terminalSettingsStore';
 
 interface TerminalPaneProps {
   sessionId: string;
@@ -13,6 +18,7 @@ interface TerminalPaneProps {
   isActive: boolean;
   onClose?: () => void;
   onTitleChange?: (title: string) => void;
+  cwd?: string;
 }
 
 const TerminalPane: React.FC<TerminalPaneProps> = ({
@@ -20,13 +26,27 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
   connectionId,
   isActive,
   onTitleChange,
+  cwd,
+  onClose,
 }) => {
+  const { activeProfile, hoveredTheme } = useTerminalSettings();
+  const [pasteConfirmText, setPasteConfirmText] = useState<string | null>(null);
+  const [hostkeyVerify, setHostkeyVerify] = useState<{ host: string; keyType: string; fingerprint: string; isMismatch: boolean; existingFingerprint?: string } | null>(null);
+  const [latency, setLatency] = useState<number | null>(null);
+  const [useWebGL, setUseWebGL] = useState(true);
+  const [connectionName, setConnectionName] = useState('Connecting...');
+  const rendererAddonRef = useRef<any>(null);
+  const cwdRestored = useRef(false);
+
+  useEffect(() => {
+    cwdRestored.current = false;
+  }, [sessionId]);
+
   const termRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const searchAddonRef = useRef<SearchAddon | null>(null);
-  const editorInstanceRef = useRef<any>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isConnected = useRef(false);
   const reconnectAttempts = useRef(0);
@@ -46,14 +66,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
   const dragCounter = useRef(0);
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; selectedText: string } | null>(null);
-  const [editorFile, setEditorFile] = useState<{
-    path: string;
-    name: string;
-    content: string;
-    isSaving: boolean;
-    error: string;
-    saveSuccess: boolean;
-  } | null>(null);
+  const [activeEditorFilePath, setActiveEditorFilePath] = useState<string | null>(null);
   const [loadingFile, setLoadingFile] = useState<string | null>(null);
   const [useSudo, setUseSudo] = useState(false);
 
@@ -61,39 +74,41 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
   const initTerminal = useCallback(() => {
     if (!termRef.current || xtermRef.current) return;
 
+    // Get current theme details
+    const currentTheme = hoveredTheme || activeProfile.theme;
+    const themeDetails = TERMINAL_THEMES[currentTheme] || TERMINAL_THEMES.omnisync_hud;
+
     const term = new Terminal({
       cursorBlink: true,
       cursorStyle: 'block',
-      fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, monospace',
-      fontSize: 13,
-      lineHeight: 1.25,
-      scrollback: 10000,
+      fontFamily: `"${activeProfile.font_family}", ui-monospace, monospace`,
+      fontSize: activeProfile.font_size,
+      lineHeight: activeProfile.line_height,
+      letterSpacing: activeProfile.letter_spacing,
+      scrollback: activeProfile.scrollback_limit,
       theme: {
-        // Base colors — warm dark bg with high-contrast foreground
-        background: '#121212',
-        foreground: '#f8f8f2',
-        cursor: '#f97316',
-        cursorAccent: '#121212',
-        selectionBackground: '#f9731650',
+        background: themeDetails.background,
+        foreground: themeDetails.foreground,
+        cursor: themeDetails.cursor,
+        cursorAccent: themeDetails.background,
+        selectionBackground: themeDetails.cursor + '50',
         selectionForeground: '#ffffff',
-        // Standard ANSI — vivid and distinct
-        black: '#21222c',
-        red: '#ff5555',
-        green: '#50fa7b',
-        yellow: '#f1fa8c',
-        blue: '#6272a4',
-        magenta: '#ff79c6',
-        cyan: '#8be9fd',
-        white: '#f8f8f2',
-        // Bright ANSI — even more vivid
-        brightBlack: '#6272a4',
-        brightRed: '#ff6e6e',
-        brightGreen: '#69ff94',
-        brightYellow: '#ffffa5',
-        brightBlue: '#d6acff',
-        brightMagenta: '#ff92df',
-        brightCyan: '#a4ffff',
-        brightWhite: '#ffffff',
+        black: themeDetails.black,
+        red: themeDetails.red,
+        green: themeDetails.green,
+        yellow: themeDetails.yellow,
+        blue: themeDetails.blue,
+        magenta: themeDetails.magenta,
+        cyan: themeDetails.cyan,
+        white: themeDetails.white,
+        brightBlack: themeDetails.black,
+        brightRed: themeDetails.red,
+        brightGreen: themeDetails.green,
+        brightYellow: themeDetails.yellow,
+        brightBlue: themeDetails.blue,
+        brightMagenta: themeDetails.magenta,
+        brightCyan: themeDetails.cyan,
+        brightWhite: themeDetails.white,
       },
       allowProposedApi: true,
     });
@@ -106,6 +121,46 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
     term.loadAddon(webLinksAddon);
     term.loadAddon(searchAddon);
 
+    // WebGL / Canvas accelerator
+    if (useWebGL) {
+      try {
+        const webglAddon = new WebglAddon();
+        term.loadAddon(webglAddon);
+        rendererAddonRef.current = webglAddon;
+      } catch (e) {
+        try {
+          const canvasAddon = new CanvasAddon();
+          term.loadAddon(canvasAddon);
+          rendererAddonRef.current = canvasAddon;
+        } catch (e2) {
+          // Fallback to 2D
+        }
+      }
+    } else {
+      try {
+        const canvasAddon = new CanvasAddon();
+        term.loadAddon(canvasAddon);
+        rendererAddonRef.current = canvasAddon;
+      } catch (e2) {
+        // Fallback to 2D
+      }
+    }
+
+    // Unicode 11 grapheme clusters
+    const unicode11Addon = new Unicode11Addon();
+    term.loadAddon(unicode11Addon);
+    term.unicode.activeVersion = '11';
+
+    // Ligatures support if enabled
+    if (activeProfile.enable_ligatures) {
+      try {
+        const ligaturesAddon = new LigaturesAddon();
+        term.loadAddon(ligaturesAddon);
+      } catch (e) {
+        console.warn('[Terminal] Ligatures addon failed to load:', e);
+      }
+    }
+
     term.open(termRef.current);
     fitAddon.fit();
 
@@ -114,7 +169,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
     searchAddonRef.current = searchAddon;
 
     return term;
-  }, []);
+  }, [activeProfile, hoveredTheme]);
 
   const formatBytes = (bytes: number): string => {
     if (bytes === 0) return '0 B';
@@ -233,7 +288,29 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
             if (msg.sessionId === currentSessionId.current) {
               isConnected.current = true;
               reconnectAttempts.current = 0; // Reset backoff on successful connection
+              setConnectionName(msg.connectionName || 'Terminal');
               onTitleChange?.(msg.connectionName || 'Terminal');
+
+              if (cwd && !cwdRestored.current) {
+                cwdRestored.current = true;
+                setTimeout(() => {
+                  if (wsRef.current?.readyState === WebSocket.OPEN && isConnected.current) {
+                    wsRef.current.send(`D:${currentSessionId.current}:cd "${cwd}"\n`);
+                  }
+                }, 1000);
+              }
+            }
+            break;
+
+          case 'terminal:hostkey-verify':
+            if (msg.sessionId === currentSessionId.current) {
+              setHostkeyVerify({
+                host: msg.host,
+                keyType: msg.keyType,
+                fingerprint: msg.fingerprint,
+                isMismatch: msg.isMismatch,
+                existingFingerprint: msg.existingFingerprint
+              });
             }
             break;
 
@@ -271,6 +348,8 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
 
     ws.onclose = () => {
       isConnected.current = false;
+      setLatency(null);
+      setConnectionName('Reconnecting...');
       // Auto-reconnect after 3s if terminal is still mounted
       reconnectTimer.current = setTimeout(() => {
         if (termRef.current) {
@@ -392,41 +471,6 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
       });
   };
 
-  const getLanguageFromExtension = (fileName: string): string => {
-    const ext = fileName.split('.').pop()?.toLowerCase() || '';
-    switch (ext) {
-      case 'js':
-      case 'jsx':
-        return 'javascript';
-      case 'ts':
-      case 'tsx':
-        return 'typescript';
-      case 'json':
-        return 'json';
-      case 'html':
-        return 'html';
-      case 'css':
-        return 'css';
-      case 'md':
-        return 'markdown';
-      case 'php':
-        return 'php';
-      case 'py':
-        return 'python';
-      case 'sh':
-      case 'bash':
-        return 'shell';
-      case 'sql':
-        return 'sql';
-      case 'yaml':
-      case 'yml':
-        return 'yaml';
-      case 'xml':
-        return 'xml';
-      default:
-        return 'plaintext';
-    }
-  };
 
   const handleCopy = useCallback(() => {
     const selection = xtermRef.current?.getSelection();
@@ -436,23 +480,77 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
     setContextMenu(null);
   }, []);
 
+  const performPaste = (text: string) => {
+    if (text && wsRef.current?.readyState === WebSocket.OPEN) {
+      // Normalize line endings to carriage return (\r) to avoid double spacing in the remote PTY
+      const normalizedText = text.replace(/\r\n/g, '\r').replace(/\n/g, '\r');
+      // Use fast-path prefix protocol
+      wsRef.current.send(`D:${currentSessionId.current}:${normalizedText}`);
+    }
+    setPasteConfirmText(null);
+    setTimeout(() => xtermRef.current?.focus(), 10);
+  };
+
   const handlePaste = useCallback(async () => {
     setContextMenu(null);
     try {
       const text = await navigator.clipboard.readText();
-      if (text && wsRef.current?.readyState === WebSocket.OPEN) {
-        // Normalize line endings to carriage return (\r) to avoid double spacing in the remote PTY
-        const normalizedText = text.replace(/\r\n/g, '\r').replace(/\n/g, '\r');
-        // Use fast-path prefix protocol
-        wsRef.current.send(`D:${currentSessionId.current}:${normalizedText}`);
+      if (!text) return;
+
+      const isMultiLine = text.includes('\n') || text.includes('\r');
+      const isVeryLong = text.length > 5000;
+
+      if (isMultiLine || isVeryLong) {
+        setPasteConfirmText(text);
+      } else {
+        performPaste(text);
       }
     } catch (err) {
       const error = err as Error;
       console.error('[Terminal Paste] Failed to read clipboard:', error.message);
     }
-    // Re-focus terminal after paste so user doesn't need to click back
-    setTimeout(() => xtermRef.current?.focus(), 10);
   }, []);
+
+  const handleExportLog = useCallback((format: 'txt' | 'html') => {
+    if (!xtermRef.current) return;
+    
+    const buffer = xtermRef.current.buffer.active;
+    let text = '';
+    
+    for (let i = 0; i < buffer.length; i++) {
+      const line = buffer.getLine(i);
+      if (line) {
+        text += line.translateToString() + '\n';
+      }
+    }
+
+    let blob: Blob;
+    let extension = 'txt';
+    if (format === 'html') {
+      const htmlContent = `<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { background: #0f172a; color: #f8fafc; font-family: monospace; padding: 20px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>${text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</body>
+</html>`;
+      blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
+      extension = 'html';
+    } else {
+      blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    }
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `terminal-session-${sessionId}.${extension}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [sessionId]);
 
   const handleClearTerminal = useCallback(() => {
     setContextMenu(null);
@@ -529,18 +627,8 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
         remotePath = cwd.endsWith('/') ? cwd + remotePath : cwd + '/' + remotePath;
       }
 
-      const fileRes = await fetch(`/api/terminal/sessions/${currentSessionId.current}/file?path=${encodeURIComponent(remotePath)}&useSudo=${!!useSudoInput}`);
-      const fileData = await fileRes.json();
-      if (!fileData.success) throw new Error(fileData.message || 'Failed to load file');
-
-      setEditorFile({
-        path: remotePath,
-        name: remotePath.split('/').pop() || 'file',
-        content: fileData.content,
-        isSaving: false,
-        error: '',
-        saveSuccess: false,
-      });
+      setUseSudo(!!useSudoInput);
+      setActiveEditorFilePath(remotePath);
     } catch (err: any) {
       console.error('[Terminal Open File] Error:', err.message);
       xtermRef.current?.write(`\r\n\x1b[31m[Open File Error: ${err.message}]\x1b[0m\r\n`);
@@ -556,65 +644,23 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
     setLoadingFile(selectedText);
 
     try {
-      // 1. Fetch remote working directory to resolve relative paths
       const cwdRes = await fetch(`/api/terminal/sessions/${currentSessionId.current}/cwd`);
       const cwdData = await cwdRes.json();
       if (!cwdData.success) throw new Error(cwdData.message || 'Failed to get remote CWD');
       const cwd = cwdData.cwd;
 
-      // 2. Resolve absolute path
       let remotePath = selectedText;
       if (!remotePath.startsWith('/')) {
         remotePath = cwd.endsWith('/') ? cwd + remotePath : cwd + '/' + remotePath;
       }
 
-      // 3. Fetch file content
-      const fileRes = await fetch(`/api/terminal/sessions/${currentSessionId.current}/file?path=${encodeURIComponent(remotePath)}`);
-      const fileData = await fileRes.json();
-      if (!fileData.success) throw new Error(fileData.message || 'Failed to download file');
-
-      setEditorFile({
-        path: remotePath,
-        name: remotePath.split('/').pop() || 'file',
-        content: fileData.content,
-        isSaving: false,
-        error: '',
-        saveSuccess: false
-      });
+      setUseSudo(false);
+      setActiveEditorFilePath(remotePath);
     } catch (err: any) {
       console.error('[Terminal Editor] Load error:', err.message);
-      // Print error directly to terminal for feedback
       xtermRef.current?.write(`\r\n\x1b[31m[Inline Editor Error: ${err.message}]\x1b[0m\r\n`);
     } finally {
       setLoadingFile(null);
-    }
-  };
-
-  const handleSaveFile = async (content: string) => {
-    if (!editorFile) return;
-    setEditorFile(prev => prev ? { ...prev, isSaving: true, error: '', saveSuccess: false } : null);
-
-    try {
-      const res = await fetch(`/api/terminal/sessions/${currentSessionId.current}/file`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          path: editorFile.path,
-          content,
-          useSudo,
-        })
-      });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.message || 'Failed to save file');
-
-      setEditorFile(prev => prev ? { ...prev, isSaving: false, saveSuccess: true, content } : null);
-      
-      // Auto clear success indicator
-      setTimeout(() => {
-        setEditorFile(prev => prev ? { ...prev, saveSuccess: false } : null);
-      }, 3000);
-    } catch (err: any) {
-      setEditorFile(prev => prev ? { ...prev, isSaving: false, error: err.message } : null);
     }
   };
 
@@ -630,6 +676,158 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
     window.addEventListener('terminal:open-file', handler);
     return () => window.removeEventListener('terminal:open-file', handler);
   }, [handleOpenFile]);
+
+  // Apply active profile settings dynamically
+  useEffect(() => {
+    const term = xtermRef.current;
+    if (!term) return;
+
+    term.options.fontFamily = `"${activeProfile.font_family}", ui-monospace, monospace`;
+    term.options.fontSize = activeProfile.font_size;
+    term.options.lineHeight = activeProfile.line_height;
+    term.options.letterSpacing = activeProfile.letter_spacing;
+    term.options.scrollback = activeProfile.scrollback_limit;
+
+    const currentTheme = hoveredTheme || activeProfile.theme;
+    const themeDetails = TERMINAL_THEMES[currentTheme] || TERMINAL_THEMES.omnisync_hud;
+    term.options.theme = {
+      background: themeDetails.background,
+      foreground: themeDetails.foreground,
+      cursor: themeDetails.cursor,
+      cursorAccent: themeDetails.background,
+      selectionBackground: themeDetails.cursor + '50',
+      selectionForeground: '#ffffff',
+      black: themeDetails.black,
+      red: themeDetails.red,
+      green: themeDetails.green,
+      yellow: themeDetails.yellow,
+      blue: themeDetails.blue,
+      magenta: themeDetails.magenta,
+      cyan: themeDetails.cyan,
+      white: themeDetails.white,
+      brightBlack: themeDetails.black,
+      brightRed: themeDetails.red,
+      brightGreen: themeDetails.green,
+      brightYellow: themeDetails.yellow,
+      brightBlue: themeDetails.blue,
+      brightMagenta: themeDetails.magenta,
+      brightCyan: themeDetails.cyan,
+      brightWhite: themeDetails.white,
+    };
+  }, [activeProfile, hoveredTheme]);
+
+  // Swap renderer addon when useWebGL changes dynamically
+  useEffect(() => {
+    const term = xtermRef.current;
+    if (!term) return;
+
+    if (rendererAddonRef.current) {
+      try {
+        rendererAddonRef.current.dispose();
+      } catch (err) {
+        // Ignore
+      }
+      rendererAddonRef.current = null;
+    }
+
+    if (useWebGL) {
+      try {
+        const webglAddon = new WebglAddon();
+        term.loadAddon(webglAddon);
+        rendererAddonRef.current = webglAddon;
+      } catch (e) {
+        try {
+          const canvasAddon = new CanvasAddon();
+          term.loadAddon(canvasAddon);
+          rendererAddonRef.current = canvasAddon;
+        } catch (e2) {
+          // Fallback to 2D
+        }
+      }
+    } else {
+      try {
+        const canvasAddon = new CanvasAddon();
+        term.loadAddon(canvasAddon);
+        rendererAddonRef.current = canvasAddon;
+      } catch (e2) {
+        // Fallback to 2D
+      }
+    }
+  }, [useWebGL]);
+
+  // Latency RTT ping monitoring
+  useEffect(() => {
+    if (!sessionId) return;
+
+    const interval = setInterval(async () => {
+      if (wsRef.current?.readyState === WebSocket.OPEN && isConnected.current) {
+        try {
+          const res = await fetch(`/api/terminal/sessions/${currentSessionId.current}/ping`, {
+            headers: {
+              'Authorization': `Bearer ${localStorage.getItem('token')}`
+            }
+          });
+          const data = await res.json();
+          if (data.success && typeof data.latency === 'number') {
+            setLatency(data.latency);
+          } else {
+            setLatency(null);
+          }
+        } catch (err) {
+          setLatency(null);
+        }
+      } else {
+        setLatency(null);
+      }
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [sessionId]);
+
+  // Listen for online/offline events for connection queue bypass
+  useEffect(() => {
+    const handleOnline = () => {
+      xtermRef.current?.write('\r\n\x1b[32m[Network connection restored, reconnecting now...]\x1b[0m\r\n');
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      reconnectAttempts.current = 0;
+      reconnectSSH();
+    };
+
+    const handleOffline = () => {
+      xtermRef.current?.write('\r\n\x1b[31m[Network connection lost, pausing reconnects...]\x1b[0m\r\n');
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [reconnectSSH]);
+
+  // Listen for clear and export commands
+  useEffect(() => {
+    const clearHandler = (e: Event) => {
+      const { sessionId: targetSessionId } = (e as CustomEvent).detail;
+      if (targetSessionId === currentSessionId.current) {
+        handleClearTerminal();
+      }
+    };
+    const exportHandler = (e: Event) => {
+      const { sessionId: targetSessionId, format } = (e as CustomEvent).detail;
+      if (targetSessionId === currentSessionId.current) {
+        handleExportLog(format);
+      }
+    };
+    window.addEventListener('terminal:clear-buffer', clearHandler);
+    window.addEventListener('terminal:export-log', exportHandler);
+    return () => {
+      window.removeEventListener('terminal:clear-buffer', clearHandler);
+      window.removeEventListener('terminal:export-log', exportHandler);
+    };
+  }, [handleClearTerminal, handleExportLog]);
 
   // Setup terminal and connect
   useEffect(() => {
@@ -743,7 +941,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
 
   return (
     <div
-      className="relative w-full h-full overflow-hidden bg-[#121212]"
+      className="relative w-full h-full overflow-hidden bg-[#121212] flex flex-col"
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
@@ -753,9 +951,55 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
       {/* xterm.js container */}
       <div
         ref={termRef}
-        className="w-full h-full"
+        className="flex-1 w-full"
         style={{ padding: '4px' }}
       />
+
+      {/* Status Bar */}
+      <div className="flex items-center justify-between px-3 h-6 bg-neutral-950 border-t border-neutral-800 text-[10px] font-mono text-neutral-500 select-none z-30">
+        {/* Left: Connection Info */}
+        <div className="flex items-center gap-2 truncate">
+          <span className={`inline-block w-1.5 h-1.5 rounded-full ${isConnected.current ? 'bg-emerald-500 animate-pulse' : 'bg-neutral-600'}`}></span>
+          <span className="text-neutral-300 font-bold uppercase tracking-wider text-[9px] bg-neutral-900 px-1 py-0.5 rounded border border-neutral-800">
+            SSH
+          </span>
+          <span className="truncate text-neutral-400">
+            {connectionName}
+          </span>
+        </div>
+
+        {/* Center: Latency */}
+        {isConnected.current && latency !== null && (
+          <div className="flex items-center gap-1.5">
+            <span className={`w-1.5 h-1.5 rounded-full ${latency < 100 ? 'bg-emerald-500' : latency < 250 ? 'bg-amber-500' : 'bg-rose-500'}`}></span>
+            <span className="text-[10px] text-neutral-400 font-bold">
+              {latency} ms
+            </span>
+            <span className="text-neutral-600">RTT</span>
+          </div>
+        )}
+
+        {/* Right: Controls */}
+        <div className="flex items-center gap-3">
+          {/* Renderer Toggle */}
+          <button
+            onClick={() => setUseWebGL(prev => !prev)}
+            className="hover:text-orange-400 transition-colors uppercase tracking-wider text-[9px] bg-neutral-900 px-1.5 py-0.5 rounded border border-neutral-800 hover:border-neutral-700"
+            title="Click to toggle WebGL/Canvas rendering"
+          >
+            Renderer: {useWebGL ? 'WebGL' : 'Canvas'}
+          </button>
+
+          {/* Clear Buffer */}
+          <button
+            onClick={handleClearTerminal}
+            className="hover:text-rose-400 transition-colors uppercase tracking-wider text-[9px] bg-neutral-900 px-1.5 py-0.5 rounded border border-neutral-800 hover:border-neutral-700"
+            title="Clear Terminal Buffer"
+          >
+            Clear
+          </button>
+        </div>
+      </div>
 
       {/* Custom Context Menu */}
       {contextMenu && (() => {
@@ -827,121 +1071,14 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
         </div>
       )}
 
-      {/* Inline Monaco Editor Modal */}
-      {editorFile && (
-        <div className="absolute inset-0 bg-neutral-950/80 backdrop-blur-sm z-50 flex flex-col p-4 animate-in fade-in duration-200" onClick={(e) => e.stopPropagation()}>
-          <div className="flex-1 bg-neutral-900 border border-neutral-800 rounded-xl shadow-2xl overflow-hidden flex flex-col">
-            {/* Modal Header */}
-            <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800 bg-neutral-950/50">
-              <div className="flex items-center gap-2 min-w-0">
-                <FileText size={14} className="text-orange-500 flex-shrink-0" />
-                <div className="min-w-0">
-                  <span className="text-xs font-mono font-bold text-neutral-200 truncate block">
-                    {editorFile.name}
-                  </span>
-                  <span className="text-[9px] font-mono text-neutral-500 truncate block mt-0.5" title={editorFile.path}>
-                    {editorFile.path}
-                  </span>
-                </div>
-              </div>
-              <button
-                onClick={() => setEditorFile(null)}
-                className="text-neutral-500 hover:text-neutral-300 transition-colors"
-              >
-                <X size={16} />
-              </button>
-            </div>
-
-            {/* Editor Container */}
-            <div className="flex-1 relative bg-neutral-950">
-              <Editor
-                height="100%"
-                language={getLanguageFromExtension(editorFile.name)}
-                theme="vs-dark"
-                value={editorFile.content}
-                onMount={(editor, monaco) => {
-                  editorInstanceRef.current = editor;
-                  // Bind Ctrl + S to save
-                  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-                    handleSaveFile(editor.getValue());
-                  });
-                }}
-                options={{
-                  fontSize: 12,
-                  fontFamily: '"JetBrains Mono", "Fira Code", monospace',
-                  minimap: { enabled: false },
-                  automaticLayout: true,
-                  scrollbar: {
-                    verticalScrollbarSize: 8,
-                    horizontalScrollbarSize: 8,
-                  },
-                }}
-              />
-            </div>
-
-            {/* Modal Footer */}
-            <div className="flex items-center justify-between px-4 py-3 border-t border-neutral-800 bg-neutral-950/50">
-              <div className="flex items-center gap-2 min-w-0">
-                {editorFile.isSaving && (
-                  <span className="flex items-center gap-1.5 text-[10px] font-mono text-orange-400">
-                    <Loader2 size={12} className="animate-spin" />
-                    Saving...
-                  </span>
-                )}
-                {editorFile.saveSuccess && (
-                  <span className="flex items-center gap-1.5 text-[10px] font-mono text-emerald-400 animate-fade-in">
-                    <CheckCircle2 size={12} />
-                    Saved successfully!
-                  </span>
-                )}
-                {editorFile.error && (
-                  <span className="flex items-center gap-1.5 text-[10px] font-mono text-rose-400 truncate max-w-xs" title={editorFile.error}>
-                    <AlertCircle size={12} />
-                    {editorFile.error}
-                  </span>
-                )}
-              </div>
-
-              <div className="flex items-center gap-3 flex-shrink-0">
-                <label className="flex items-center gap-1.5 text-xs font-mono text-neutral-400 hover:text-neutral-200 cursor-pointer select-none mr-2">
-                  <input
-                    type="checkbox"
-                    checked={useSudo}
-                    onChange={(e) => setUseSudo(e.target.checked)}
-                    className="accent-orange-500 rounded bg-neutral-950 border-neutral-800 focus:ring-0 focus:ring-offset-0"
-                  />
-                  <span className="text-orange-500 font-bold uppercase tracking-wider">SUDO</span>
-                </label>
-                <button
-                  onClick={() => setEditorFile(null)}
-                  className="px-3 py-1.5 text-xs font-mono text-neutral-400 hover:text-neutral-200 border border-neutral-800 hover:border-neutral-700 rounded transition-colors"
-                >
-                  Close
-                </button>
-                <button
-                  onClick={() => handleDownloadFile(editorFile.path)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono text-neutral-300 hover:text-neutral-100 border border-neutral-800 hover:border-neutral-600 rounded transition-colors"
-                  title="Download this file"
-                >
-                  <Download size={12} />
-                  Download
-                </button>
-                <button
-                  onClick={() => {
-                    if (editorInstanceRef.current) {
-                      handleSaveFile(editorInstanceRef.current.getValue());
-                    }
-                  }}
-                  disabled={editorFile.isSaving}
-                  className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-mono font-bold uppercase bg-orange-600 hover:bg-orange-500 text-black border border-orange-700 rounded disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  <Save size={12} />
-                  Save
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+      {/* Remote Monaco Editor */}
+      {activeEditorFilePath && (
+        <RemoteFileEditor
+          connectionId={connectionId}
+          remotePath={activeEditorFilePath}
+          onClose={() => setActiveEditorFilePath(null)}
+          useSudo={useSudo}
+        />
       )}
 
       {/* Drag overlay */}
@@ -1067,6 +1204,139 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
               {uploadProgress.error}
             </p>
           )}
+        </div>
+      )}
+
+      {/* Safe Paste Confirmation Modal */}
+      {pasteConfirmText && (
+        <div className="absolute inset-0 bg-neutral-950/70 backdrop-blur-sm z-50 flex items-center justify-center p-4 bg-opacity-70">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-xl w-full max-w-md shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center gap-2 px-4 py-3 border-b border-neutral-800 bg-neutral-900/50">
+              <AlertCircle size={14} className="text-amber-500" />
+              <span className="text-xs font-mono uppercase tracking-wider text-neutral-300">
+                Warning: Safe Paste Confirmation
+              </span>
+            </div>
+            <div className="p-4 space-y-3">
+              <p className="text-xs font-mono text-neutral-400">
+                You are pasting text that contains multiple lines or is very long. This might execute commands immediately!
+              </p>
+              <div className="max-h-[150px] overflow-y-auto bg-neutral-950 border border-neutral-800 rounded p-2 text-[10px] font-mono text-neutral-500 break-all whitespace-pre-wrap select-all">
+                {pasteConfirmText.slice(0, 1000)}
+                {pasteConfirmText.length > 1000 && '\n... [truncated]'}
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-800 bg-neutral-900/50">
+              <button
+                onClick={() => {
+                  setPasteConfirmText(null);
+                  setTimeout(() => xtermRef.current?.focus(), 10);
+                }}
+                className="px-3 py-1.5 text-xs font-mono text-neutral-400 hover:text-neutral-200 border border-neutral-800 hover:border-neutral-700 rounded transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => performPaste(pasteConfirmText)}
+                className="px-4 py-1.5 text-xs font-mono font-bold uppercase bg-amber-500 hover:bg-amber-400 text-black border border-amber-600 rounded transition-colors"
+              >
+                Paste Anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SSH Host Key Verification Modal */}
+      {hostkeyVerify && (
+        <div className="absolute inset-0 bg-neutral-950/70 backdrop-blur-sm z-50 flex items-center justify-center p-4 bg-opacity-70">
+          <div className={`bg-neutral-900 border ${hostkeyVerify.isMismatch ? 'border-red-900' : 'border-neutral-800'} rounded-xl w-full max-w-lg shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200`}>
+            <div className={`flex items-center gap-2 px-4 py-3 border-b ${hostkeyVerify.isMismatch ? 'border-red-900/50 bg-red-950/20' : 'border-neutral-800 bg-neutral-900/50'}`}>
+              <AlertCircle size={14} className={hostkeyVerify.isMismatch ? 'text-red-500' : 'text-amber-500'} />
+              <span className={`text-xs font-mono uppercase tracking-wider ${hostkeyVerify.isMismatch ? 'text-red-400 font-bold' : 'text-neutral-300'}`}>
+                {hostkeyVerify.isMismatch ? 'WARNING: Host Identification Changed!' : 'SSH Host Key Verification'}
+              </span>
+            </div>
+            
+            <div className="p-4 space-y-3 font-mono text-xs text-neutral-300">
+              {hostkeyVerify.isMismatch ? (
+                <div className="text-red-400 space-y-2 border border-red-900/50 bg-red-950/10 p-3 rounded text-[11px] mb-2 leading-relaxed">
+                  <p className="font-bold">🚨 WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! 🚨</p>
+                  <p>Someone could be eavesdropping on your connection (Man-in-the-Middle attack).</p>
+                  <p>It is also possible that a host key has just been changed by the administrator.</p>
+                </div>
+              ) : (
+                <p className="text-neutral-400">
+                  The authenticity of host <span className="text-neutral-200">'{hostkeyVerify.host}'</span> can't be established.
+                </p>
+              )}
+
+              <div className="space-y-1.5 bg-neutral-950 border border-neutral-800 rounded p-3 text-[11px] text-neutral-400">
+                <div><span className="text-neutral-500">Host:</span> <span className="text-neutral-300">{hostkeyVerify.host}</span></div>
+                <div><span className="text-neutral-500">Key Type:</span> <span className="text-neutral-300">{hostkeyVerify.keyType}</span></div>
+                <div><span className="text-neutral-500">Fingerprint:</span> <span className="text-neutral-200 font-bold">{hostkeyVerify.fingerprint}</span></div>
+                {hostkeyVerify.isMismatch && hostkeyVerify.existingFingerprint && (
+                  <div className="mt-2 pt-2 border-t border-neutral-800/80 text-red-400/80">
+                    <span className="text-neutral-500">Previously Verified Fingerprint:</span>
+                    <div className="font-mono text-neutral-400">{hostkeyVerify.existingFingerprint}</div>
+                  </div>
+                )}
+              </div>
+
+              {!hostkeyVerify.isMismatch && (
+                <p className="text-neutral-500 text-[11px]">
+                  Are you sure you want to continue connecting (Accept & Save to known_hosts)?
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-800 bg-neutral-900/50">
+              <button
+                onClick={() => {
+                  setHostkeyVerify(null);
+                  onClose?.();
+                }}
+                className="px-3 py-1.5 text-xs font-mono text-neutral-400 hover:text-neutral-200 border border-neutral-800 hover:border-neutral-700 rounded transition-colors"
+              >
+                Abort Connection
+              </button>
+              <button
+                onClick={async () => {
+                  const details = hostkeyVerify;
+                  setHostkeyVerify(null);
+                  try {
+                    const res = await fetch('/api/terminal/known-hosts', {
+                      method: 'POST',
+                      headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${localStorage.getItem('token')}`
+                      },
+                      body: JSON.stringify({
+                        host: details.host,
+                        keyType: details.keyType,
+                        fingerprint: details.fingerprint
+                      })
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                      connectWS();
+                    } else {
+                      alert('Failed to save host fingerprint: ' + data.message);
+                    }
+                  } catch (err: any) {
+                    alert('Error saving host fingerprint: ' + err.message);
+                  }
+                }}
+                className={`px-4 py-1.5 text-xs font-mono font-bold uppercase rounded border transition-colors ${
+                  hostkeyVerify.isMismatch 
+                    ? 'bg-red-600 hover:bg-red-500 text-white border-red-700' 
+                    : 'bg-orange-500 hover:bg-orange-400 text-black border-orange-600'
+                }`}
+              >
+                {hostkeyVerify.isMismatch ? 'Trust Key & Connect' : 'Accept & Connect'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

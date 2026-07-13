@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { X, Plus, Terminal, Circle } from 'lucide-react';
 
 export interface TerminalTab {
@@ -7,6 +7,8 @@ export interface TerminalTab {
   connectionId: number;
   title: string;
   isConnected: boolean;
+  cwd?: string;
+  color?: string;
 }
 
 interface TerminalTabBarProps {
@@ -15,6 +17,8 @@ interface TerminalTabBarProps {
   onSelectTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
   onNewTab: () => void;
+  onUpdateTabColor?: (tabId: string, color: string | undefined) => void;
+  onRenameTab?: (tabId: string, newTitle: string) => void;
 }
 
 const TerminalTabBar: React.FC<TerminalTabBarProps> = ({
@@ -23,9 +27,12 @@ const TerminalTabBar: React.FC<TerminalTabBarProps> = ({
   onSelectTab,
   onCloseTab,
   onNewTab,
+  onUpdateTabColor,
+  onRenameTab,
 }) => {
   const tabsContainerRef = useRef<HTMLDivElement>(null);
   const [dragTabId, setDragTabId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ tabId: string; x: number; y: number } | null>(null);
 
   const handleTabClose = useCallback(
     (e: React.MouseEvent, tabId: string) => {
@@ -35,8 +42,28 @@ const TerminalTabBar: React.FC<TerminalTabBarProps> = ({
     [onCloseTab]
   );
 
+  const handleContextMenu = useCallback((e: React.MouseEvent, tabId: string) => {
+    e.preventDefault();
+    setContextMenu({
+      tabId,
+      x: e.clientX,
+      y: e.clientY
+    });
+  }, []);
+
+  const closeContextMenu = useCallback(() => {
+    setContextMenu(null);
+  }, []);
+
+  useEffect(() => {
+    if (contextMenu) {
+      window.addEventListener('click', closeContextMenu);
+      return () => window.removeEventListener('click', closeContextMenu);
+    }
+  }, [contextMenu, closeContextMenu]);
+
   return (
-    <div className="flex items-center bg-neutral-950 border-b border-neutral-800 h-9 select-none">
+    <div className="flex items-center bg-neutral-950 border-b border-neutral-800 h-9 select-none relative">
       {/* Tab list */}
       <div
         ref={tabsContainerRef}
@@ -48,6 +75,7 @@ const TerminalTabBar: React.FC<TerminalTabBarProps> = ({
             <div
               key={tab.id}
               onClick={() => onSelectTab(tab.id)}
+              onContextMenu={(e) => handleContextMenu(e, tab.id)}
               draggable
               onDragStart={() => setDragTabId(tab.id)}
               onDragEnd={() => setDragTabId(null)}
@@ -56,11 +84,14 @@ const TerminalTabBar: React.FC<TerminalTabBarProps> = ({
                 border-r border-neutral-800 min-w-[120px] max-w-[200px]
                 transition-colors duration-100
                 ${isActive
-                  ? 'bg-neutral-900 text-neutral-100 border-b-2 border-b-orange-500'
+                  ? 'bg-neutral-900 text-neutral-100 border-b-2'
                   : 'bg-neutral-950 text-neutral-500 hover:bg-neutral-900/50 hover:text-neutral-300 border-b-2 border-b-transparent'
                 }
                 ${dragTabId === tab.id ? 'opacity-50' : ''}
               `}
+              style={{
+                borderBottomColor: isActive ? (tab.color || '#f97316') : 'transparent'
+              }}
             >
               {/* Connection status dot */}
               <Circle
@@ -71,7 +102,11 @@ const TerminalTabBar: React.FC<TerminalTabBarProps> = ({
               />
 
               {/* Tab icon */}
-              <Terminal size={12} className="flex-shrink-0 text-neutral-500" />
+              <Terminal
+                size={12}
+                className="flex-shrink-0"
+                style={{ color: tab.color || '#737373' }}
+              />
 
               {/* Tab title */}
               <span className="text-[11px] font-mono truncate flex-1">
@@ -81,7 +116,7 @@ const TerminalTabBar: React.FC<TerminalTabBarProps> = ({
               {/* Close button */}
               <button
                 onClick={(e) => handleTabClose(e, tab.id)}
-                className="flex-shrink-0 p-0.5 opacity-0 group-hover:opacity-100 hover:bg-neutral-700 transition-opacity"
+                className="flex-shrink-0 p-0.5 opacity-0 group-hover:opacity-100 hover:bg-neutral-700 transition-opacity rounded"
               >
                 <X size={11} />
               </button>
@@ -98,6 +133,54 @@ const TerminalTabBar: React.FC<TerminalTabBarProps> = ({
       >
         <Plus size={14} />
       </button>
+
+      {/* Right-click Context Menu */}
+      {contextMenu && (
+        <div
+          className="fixed z-50 bg-neutral-900 border border-neutral-800 rounded shadow-lg py-1 text-xs text-neutral-300 min-w-[150px] font-mono"
+          style={{ top: contextMenu.y, left: contextMenu.x }}
+        >
+          <div className="px-3 py-1.5 text-neutral-500 border-b border-neutral-800 font-bold uppercase tracking-wider text-[9px]">
+            Tab Options
+          </div>
+          
+          <button
+            onClick={() => {
+              const tabToRename = tabs.find(t => t.id === contextMenu.tabId);
+              const newTitle = prompt('Enter new tab title:', tabToRename?.title || '');
+              if (newTitle !== null) {
+                onRenameTab?.(contextMenu.tabId, newTitle.trim() || 'Terminal');
+              }
+            }}
+            className="w-full text-left px-3 py-1.5 hover:bg-neutral-800 hover:text-white transition-colors"
+          >
+            Rename Tab...
+          </button>
+          
+          <div className="border-t border-neutral-800 my-1"></div>
+          
+          <div className="px-3 py-1 text-[10px] text-neutral-500 font-bold">
+            Select Color:
+          </div>
+          <div className="grid grid-cols-6 gap-1 px-3 py-2">
+            {[
+              { name: 'none', value: undefined, class: 'bg-neutral-700 border border-neutral-500' },
+              { name: 'red', value: '#ef4444', class: 'bg-red-500' },
+              { name: 'emerald', value: '#10b981', class: 'bg-emerald-500' },
+              { name: 'sky', value: '#0ea5e9', class: 'bg-sky-500' },
+              { name: 'amber', value: '#f59e0b', class: 'bg-amber-500' },
+              { name: 'purple', value: '#a855f7', class: 'bg-purple-500' }
+            ].map((color) => (
+              <button
+                key={color.name}
+                title={color.name}
+                onClick={() => onUpdateTabColor?.(contextMenu.tabId, color.value)}
+                className={`w-4 h-4 rounded-full ${color.class} hover:scale-110 transition-transform`}
+              />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

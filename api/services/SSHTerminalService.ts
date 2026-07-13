@@ -33,6 +33,7 @@ interface TerminalSession {
 
 class SSHTerminalService {
   private sessions: Map<string, TerminalSession> = new Map();
+  public onHostKeyVerify: ((sessionId: string, details: { host: string; keyType: string; fingerprint: string; isMismatch: boolean; existingFingerprint?: string }) => void) | null = null;
 
   private generateId(): string {
     return crypto.randomBytes(8).toString('hex');
@@ -166,6 +167,58 @@ class SSHTerminalService {
     connectConfig.port = port;
     connectConfig.username = username;
 
+    const db = await getDb();
+    const knownKeys = await db.all('SELECT * FROM known_hosts WHERE host = ?', [host]);
+
+    connectConfig.hostVerifier = (keyBuffer: Buffer) => {
+      try {
+        const len = keyBuffer.readUInt32BE(0);
+        const keyType = keyBuffer.toString('utf8', 4, 4 + len);
+        const hash = crypto.createHash('sha256').update(keyBuffer).digest('base64').replace(/=+$/, '');
+        const fingerprint = `SHA256:${hash}`;
+
+        if (knownKeys.length === 0) {
+          // Unknown host
+          this.onHostKeyVerify?.(sessionId, {
+            host,
+            keyType,
+            fingerprint,
+            isMismatch: false
+          });
+          return false;
+        }
+
+        const match = knownKeys.find((k) => k.key_type === keyType);
+        if (!match) {
+          // Known host but new key type
+          this.onHostKeyVerify?.(sessionId, {
+            host,
+            keyType,
+            fingerprint,
+            isMismatch: false
+          });
+          return false;
+        }
+
+        if (match.fingerprint !== fingerprint) {
+          // Mismatch! Key changed
+          this.onHostKeyVerify?.(sessionId, {
+            host,
+            keyType,
+            fingerprint,
+            isMismatch: true,
+            existingFingerprint: match.fingerprint
+          });
+          return false;
+        }
+
+        return true;
+      } catch (err) {
+        console.error('[SSH Terminal] hostVerifier exception:', err);
+        return false;
+      }
+    };
+
     const connectAttempt = new Promise<void>((resolve, reject) => {
       session.sshClient.on('ready', () => {
         session.sshClient.shell(
@@ -263,6 +316,32 @@ class SSHTerminalService {
   /** Whether the session has an active SSH shell (connect() completed) */
   isSessionConnected(sessionId: string): boolean {
     return !!this.sessions.get(sessionId)?.shellStream;
+  }
+
+  /** Send keepalive packet and check if session is still alive */
+  async ping(sessionId: string): Promise<boolean> {
+    const session = this.sessions.get(sessionId);
+    if (!session || !session.sshClient) return false;
+
+    return new Promise<boolean>((resolve) => {
+      const timeout = setTimeout(() => {
+        resolve(false);
+      }, 3000);
+
+      if (typeof (session.sshClient as any).requestKeepalive === 'function') {
+        (session.sshClient as any).requestKeepalive((err: any) => {
+          clearTimeout(timeout);
+          if (err) {
+            resolve(false);
+          } else {
+            resolve(true);
+          }
+        });
+      } else {
+        clearTimeout(timeout);
+        resolve(false);
+      }
+    });
   }
 
   /** Attach a new client to an existing session, re-sending buffered output */
@@ -937,6 +1016,152 @@ pwd
             reject(errRen);
           }
           else resolve();
+        });
+      });
+    });
+  }
+
+  /** Execute arbitrary command on remote and return stdout */
+  async execCommand(sessionId: string, cmd: string): Promise<string> {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error('Session not found');
+
+    return new Promise<string>((resolve, reject) => {
+      session.sshClient.exec(cmd, (err, stream) => {
+        if (err) { reject(err); return; }
+
+        let stdout = '';
+        let stderr = '';
+        let exitCode = 0;
+
+        stream.on('exit', (code) => {
+          exitCode = code || 0;
+        });
+
+        stream.on('data', (data: Buffer) => {
+          stdout += data.toString('utf-8');
+        });
+
+        stream.stderr.on('data', (data: Buffer) => {
+          stderr += data.toString('utf-8');
+        });
+
+        stream.on('close', () => {
+          if (exitCode !== 0) {
+            reject(new Error(stderr.trim() || `Command failed with code ${exitCode}`));
+          } else {
+            resolve(stdout);
+          }
+        });
+      });
+    });
+  }
+
+  /** Change remote permissions (CHMOD) via SFTP */
+  async chmodRemote(sessionId: string, remotePath: string, mode: number, recursive: boolean = false): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error('Session not found');
+
+    if (recursive) {
+      const octalStr = mode.toString(8);
+      const cmd = `chmod -R ${octalStr} "${remotePath.replace(/"/g, '\\"')}"`;
+      await this.execCommand(sessionId, cmd);
+      return;
+    }
+
+    return new Promise((resolve, reject) => {
+      session.sshClient.sftp((err, sftp) => {
+        if (err) { reject(err); return; }
+        sftp.chmod(remotePath, mode, (errChmod) => {
+          sftp.end();
+          if (errChmod) reject(errChmod);
+          else resolve();
+        });
+      });
+    });
+  }
+
+  /** Recursively calculate directory size & file count */
+  async getRemoteDirSize(sessionId: string, remotePath: string): Promise<{ size: number; count: number }> {
+    // Try du -sb first
+    try {
+      const output = await this.execCommand(sessionId, `du -sb "${remotePath.replace(/"/g, '\\"')}"`);
+      const match = output.trim().match(/^(\d+)\s+/);
+      if (match) {
+        const size = parseInt(match[1], 10);
+        let count = 0;
+        try {
+          const countOutput = await this.execCommand(sessionId, `find "${remotePath.replace(/"/g, '\\"')}" -type f | wc -l`);
+          count = parseInt(countOutput.trim(), 10) || 0;
+        } catch {
+          // ignore error
+        }
+        return { size, count };
+      }
+    } catch {
+      // du -sb failed
+    }
+
+    return this.getRemoteDirSizeSftp(sessionId, remotePath);
+  }
+
+  /** Fallback recursive directory size calculation via SFTP */
+  private async getRemoteDirSizeSftp(sessionId: string, remotePath: string): Promise<{ size: number; count: number }> {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error('Session not found');
+
+    let size = 0;
+    let count = 0;
+
+    const traverse = async (dir: string, sftp: any): Promise<void> => {
+      return new Promise((resolve, reject) => {
+        sftp.readdir(dir, async (err: any, list: any[]) => {
+          if (err) { reject(err); return; }
+          const promises = (list || []).map(async (entry) => {
+            const entryPath = dir.endsWith('/') ? dir + entry.filename : dir + '/' + entry.filename;
+            const isDir = (entry.attrs.mode & 0o40000) !== 0;
+            if (isDir) {
+              if (entry.filename !== '.' && entry.filename !== '..') {
+                await traverse(entryPath, sftp);
+              }
+            } else {
+              size += entry.attrs.size || 0;
+              count++;
+            }
+          });
+          try {
+            await Promise.all(promises);
+            resolve();
+          } catch (traverseErr) {
+            reject(traverseErr);
+          }
+        });
+      });
+    };
+
+    return new Promise((resolve, reject) => {
+      session.sshClient.sftp(async (err, sftp) => {
+        if (err) { reject(err); return; }
+        sftp.stat(remotePath, async (errStat: any, stats: any) => {
+          if (errStat) {
+            sftp.end();
+            reject(errStat);
+            return;
+          }
+          const isDir = (stats.mode & 0o40000) !== 0;
+          if (!isDir) {
+            sftp.end();
+            resolve({ size: stats.size || 0, count: 1 });
+            return;
+          }
+          try {
+            await traverse(remotePath, sftp);
+            sftp.end();
+            resolve({ size, count });
+          } catch (traverseErr) {
+            sftp.end();
+            reject(traverseErr);
+          }
         });
       });
     });

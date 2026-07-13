@@ -15,6 +15,7 @@ import util from 'util';
 import { ConnectionPool } from './transfer/ConnectionPool.js';
 import { ProgressTracker, OverallProgress, UploadProgress } from './transfer/ProgressTracker.js';
 import { fileURLToPath } from 'url';
+import ChecksumVerifier from './ChecksumVerifier.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -550,6 +551,16 @@ class SyncSession {
           highWaterMark: bufferSizeMB * 1024 * 1024
         });
         await client.uploadFrom(readStream, remotePath, { localStart: offset });
+
+        if (this.config.enable_checksum) {
+          this.log('info', `Verifying checksum for ${filename}...`);
+          const localHash = await ChecksumVerifier.computeLocalHash(localPath);
+          const remoteHash = await ChecksumVerifier.computeRemoteHash(client, remotePath);
+          if (localHash !== remoteHash) {
+            throw new Error(`Checksum mismatch! Local: ${localHash}, Remote: ${remoteHash}`);
+          }
+          this.log('success', `Checksum verified successfully for ${filename}`);
+        }
 
         // Record final remaining bytes to window
         const prevProgress = this.uploadProgress.get(taskId);
@@ -1116,6 +1127,16 @@ class SyncSession {
         });
         await client.uploadFrom(readStream, remotePath);
 
+        if (this.config.enable_checksum) {
+          this.log('info', `Verifying checksum for ${localFilename}...`);
+          const localHash = await ChecksumVerifier.computeLocalHash(localPath);
+          const remoteHash = await ChecksumVerifier.computeRemoteHash(client, remotePath);
+          if (localHash !== remoteHash) {
+            throw new Error(`Checksum mismatch! Local: ${localHash}, Remote: ${remoteHash}`);
+          }
+          this.log('success', `Checksum verified successfully for ${localFilename}`);
+        }
+
         // Record final remaining bytes to window
         const prevProgress = this.uploadProgress.get(taskId);
         const prevBytes = prevProgress ? prevProgress.bytesTransferred : 0;
@@ -1308,6 +1329,16 @@ class SyncSession {
 
         await fs.ensureDir(path.dirname(localPath));
         await client.downloadTo(localPath, remoteFilePath, offset);
+
+        if (this.config.enable_checksum) {
+          this.log('info', `Verifying checksum for ${path.basename(remoteFilePath)}...`);
+          const localHash = await ChecksumVerifier.computeLocalHash(localPath);
+          const remoteHash = await ChecksumVerifier.computeRemoteHash(client, remoteFilePath);
+          if (localHash !== remoteHash) {
+            throw new Error(`Checksum mismatch! Local: ${localHash}, Remote: ${remoteHash}`);
+          }
+          this.log('success', `Checksum verified successfully for ${path.basename(remoteFilePath)}`);
+        }
 
         // Record final remaining bytes to window
         const prevProgress = this.uploadProgress.get(taskId);
@@ -1870,6 +1901,74 @@ class SyncSession {
     });
   }
 
+  public async getRemoteFile(remotePath: string): Promise<{ content: string; modifiedAt: string; size: number }> {
+    return this.mutex.run(async () => {
+      await this.ensureConnection();
+
+      const stats = await this.client.stat(remotePath);
+      if (!stats) throw new Error('File not found');
+
+      const chunks: Buffer[] = [];
+      const writable = new (require('stream').Writable)({
+        write(chunk: any, encoding: any, callback: any) {
+          chunks.push(chunk);
+          callback();
+        }
+      });
+
+      await this.client.downloadTo(writable, remotePath);
+      const buffer = Buffer.concat(chunks);
+
+      if (buffer.length > 1024 * 1024 * 5) {
+        throw new Error('File is too large to edit (limit is 5MB).');
+      }
+
+      return {
+        content: buffer.toString('utf8'),
+        modifiedAt: stats.modifiedAt ? stats.modifiedAt.toISOString() : new Date().toISOString(),
+        size: stats.size
+      };
+    });
+  }
+
+  public async saveRemoteFile(remotePath: string, content: string, lastModifiedAt?: string): Promise<{ success: boolean; modifiedAt: string }> {
+    return this.mutex.run(async () => {
+      await this.ensureConnection();
+
+      if (lastModifiedAt) {
+        try {
+          const stats = await this.client.stat(remotePath);
+          if (stats && stats.modifiedAt) {
+            const currentModified = stats.modifiedAt.getTime();
+            const expectedModified = new Date(lastModifiedAt).getTime();
+
+            if (currentModified > expectedModified + 2000) {
+              throw new Error('CONFLICT_DETECTED: The file on the remote server has been modified by someone else since you loaded it. Please reload the file to merge changes.');
+            }
+          }
+        } catch (statErr: any) {
+          if (!statErr.message.includes('not found') && !statErr.message.includes('No such file') && !statErr.message.includes('450')) {
+            throw statErr;
+          }
+        }
+      }
+
+      const readable = new (require('stream').Readable)();
+      readable.push(content);
+      readable.push(null);
+
+      await this.client.uploadFrom(readable, remotePath);
+
+      const stats = await this.client.stat(remotePath);
+      if (!stats) throw new Error('Failed to retrieve stats after saving');
+
+      return {
+        success: true,
+        modifiedAt: stats.modifiedAt ? stats.modifiedAt.toISOString() : new Date().toISOString()
+      };
+    });
+  }
+
   public async resumeInterrupted(interruptedItems: any[]) {
     this.log('info', `Resuming ${interruptedItems.length} interrupted transfers from previous crash...`);
 
@@ -2078,6 +2177,16 @@ class SyncManager extends EventEmitter {
   public async getContentDiff(connectionId: number, filename: string, remoteName?: string) {
     const session = await this.getSession(connectionId);
     return session.getContentDiff(filename, remoteName);
+  }
+
+  public async getRemoteFile(connectionId: number, remotePath: string): Promise<{ content: string; modifiedAt: string; size: number }> {
+    const session = await this.getSession(connectionId);
+    return session.getRemoteFile(remotePath);
+  }
+
+  public async saveRemoteFile(connectionId: number, remotePath: string, content: string, lastModifiedAt?: string): Promise<{ success: boolean; modifiedAt: string }> {
+    const session = await this.getSession(connectionId);
+    return session.saveRemoteFile(remotePath, content, lastModifiedAt);
   }
 
   public async runWithClient<T>(connectionId: number, fn: (client: TransferClient) => Promise<T>, isInteractive = false): Promise<T> {

@@ -4,7 +4,8 @@ import ConnectionManager from './pages/ConnectionManager';
 import TerminalView from './components/terminal/TerminalView';
 import OverviewDashboard from './pages/OverviewDashboard';
 import SettingsPage from './pages/SettingsPage';
-import { Terminal, Server, LayoutDashboard, Lock, Unlock, Eye, EyeOff, ShieldAlert, Key, Check, Loader2, LogOut, Settings } from 'lucide-react';
+import CommanderLayout from './pages/CommanderLayout';
+import { Terminal, Server, LayoutDashboard, Lock, Unlock, Eye, EyeOff, ShieldAlert, Key, Check, Loader2, LogOut, Settings, ArrowLeftRight } from 'lucide-react';
 import packageJson from '../package.json';
 import { useAuthStore } from './stores/authStore';
 
@@ -14,6 +15,7 @@ function AppContent() {
   
   const isOverview = location.pathname === '/' || location.pathname === '/overview';
   const isConnections = location.pathname === '/connections';
+  const isExplorer = location.pathname === '/explorer';
   const isTerminal = location.pathname === '/terminal';
   const isSettings = location.pathname === '/settings';
 
@@ -51,6 +53,10 @@ function AppContent() {
               <button onClick={() => navigate('/connections')} className={navClass(isConnections)}>
                 <Server size={13} />
                 Connections
+              </button>
+              <button onClick={() => navigate('/explorer')} className={navClass(isExplorer)}>
+                <ArrowLeftRight size={13} />
+                Explorer
               </button>
               <button onClick={() => navigate('/terminal')} className={navClass(isTerminal)}>
                 <Terminal size={13} />
@@ -91,6 +97,9 @@ function AppContent() {
         </div>
         <div style={{ display: isConnections ? 'block' : 'none' }}>
           <ConnectionManager />
+        </div>
+        <div style={{ display: isExplorer ? 'block' : 'none' }}>
+          <CommanderLayout />
         </div>
         <div style={{ display: isTerminal ? 'block' : 'none' }}>
           <TerminalView />

@@ -75,6 +75,21 @@ router.get('/sessions/:sessionId/cwd', async (req: Request, res: Response) => {
   }
 });
 
+router.get('/sessions/:sessionId/ping', async (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  try {
+    const start = Date.now();
+    const success = await sshTerminalService.ping(sessionId);
+    if (success) {
+      res.json({ success: true, latency: Date.now() - start });
+    } else {
+      res.status(500).json({ success: false, message: 'Ping failed' });
+    }
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 router.post('/sessions/:sessionId/upload', async (req: Request, res: Response) => {
   const { sessionId } = req.params;
   const { paths, remoteDir } = req.body;
@@ -402,6 +417,121 @@ router.post('/sessions/:sessionId/rename', async (req: Request, res: Response) =
   }
 });
 
+// Chmod Permissions
+router.post('/sessions/:sessionId/chmod', async (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  const { path: remotePath, mode, recursive } = req.body;
+  if (!remotePath || mode === undefined) {
+    res.status(400).json({ success: false, message: 'path and mode are required' });
+    return;
+  }
+  try {
+    const octalMode = typeof mode === 'string' ? parseInt(mode, 8) : mode;
+    await sshTerminalService.chmodRemote(sessionId, remotePath, octalMode, !!recursive);
+    res.json({ success: true, message: 'Permissions updated successfully' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Archive (Compression)
+router.post('/sessions/:sessionId/archive', async (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  const { folderPath, archivePath, type } = req.body; // type: 'zip' | 'tar'
+  if (!folderPath || !archivePath) {
+    res.status(400).json({ success: false, message: 'folderPath and archivePath are required' });
+    return;
+  }
+  try {
+    const parentDir = path.posix.dirname(folderPath);
+    const baseName = path.posix.basename(folderPath);
+    let cmd = '';
+    if (type === 'tar') {
+      cmd = `cd "${parentDir}" && tar -czf "${archivePath}" "${baseName}"`;
+    } else {
+      cmd = `cd "${parentDir}" && zip -r "${archivePath}" "${baseName}"`;
+    }
+    await sshTerminalService.execCommand(sessionId, cmd);
+    res.json({ success: true, message: 'Archived successfully' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Extract (Decompression)
+router.post('/sessions/:sessionId/extract', async (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  const { archivePath, extractPath } = req.body;
+  if (!archivePath || !extractPath) {
+    res.status(400).json({ success: false, message: 'archivePath and extractPath are required' });
+    return;
+  }
+  try {
+    let cmd = '';
+    if (archivePath.endsWith('.tar.gz') || archivePath.endsWith('.tgz')) {
+      cmd = `tar -xzf "${archivePath}" -C "${extractPath}"`;
+    } else {
+      cmd = `unzip -o "${archivePath}" -d "${extractPath}"`;
+    }
+    await sshTerminalService.execCommand(sessionId, cmd);
+    res.json({ success: true, message: 'Extracted successfully' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Bulk Rename
+router.post('/sessions/:sessionId/bulk-rename', async (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  const { dirPath, items } = req.body; // items: { oldName: string, newName: string }[]
+  if (!dirPath || !items || !Array.isArray(items)) {
+    res.status(400).json({ success: false, message: 'dirPath and items array are required' });
+    return;
+  }
+  try {
+    for (const item of items) {
+      const oldFullPath = path.posix.join(dirPath, item.oldName);
+      const newFullPath = path.posix.join(dirPath, item.newName);
+      await sshTerminalService.renamePath(sessionId, oldFullPath, newFullPath, false);
+    }
+    res.json({ success: true, message: 'Bulk rename completed successfully' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Directory Size Cache and Endpoint
+const dirSizeCache = new Map<string, { size: number; count: number; timestamp: number }>();
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+router.get('/sessions/:sessionId/dir-size', async (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  const dirPath = req.query.path as string;
+  const force = req.query.force === 'true';
+
+  if (!dirPath) {
+    res.status(400).json({ success: false, message: 'path parameter is required' });
+    return;
+  }
+
+  const cacheKey = `${sessionId}:${dirPath}`;
+  if (!force) {
+    const cached = dirSizeCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+      res.json({ success: true, ...cached, fromCache: true });
+      return;
+    }
+  }
+
+  try {
+    const result = await sshTerminalService.getRemoteDirSize(sessionId, dirPath);
+    dirSizeCache.set(cacheKey, { ...result, timestamp: Date.now() });
+    res.json({ success: true, ...result, fromCache: false });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 // --- Command Snippets ---
 
 router.get('/snippets', async (req: Request, res: Response) => {
@@ -480,6 +610,165 @@ router.post('/snippets/:id/use', async (req: Request, res: Response) => {
       req.params.id
     );
     res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Accept a host fingerprint and save to known_hosts
+router.post('/known-hosts', async (req: Request, res: Response) => {
+  const { host, keyType, fingerprint } = req.body;
+  if (!host || !keyType || !fingerprint) {
+    res.status(400).json({ success: false, message: 'host, keyType, and fingerprint are required' });
+    return;
+  }
+
+  try {
+    const db = await getDb();
+    // Use INSERT OR REPLACE so that mismatch updates work
+    await db.run(
+      `INSERT OR REPLACE INTO known_hosts (host, key_type, fingerprint)
+       VALUES (?, ?, ?)`,
+      [host, keyType, fingerprint]
+    );
+
+    res.json({ success: true, message: 'Host fingerprint accepted' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Helper: Parse SSH config content
+function parseSshConfig(content: string): any[] {
+  const lines = content.split(/\r?\n/);
+  const connections: any[] = [];
+  let currentHost: any = null;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const match = trimmed.match(/^([a-zA-Z0-9_]+)\s*=?\s*(.+)$/);
+    if (!match) continue;
+
+    const key = match[1].toLowerCase();
+    const val = match[2].trim().replace(/^"(.*)"$/, '$1');
+
+    if (key === 'host') {
+      if (val === '*') continue;
+      
+      if (currentHost && currentHost.server) {
+        connections.push(currentHost);
+      }
+      
+      currentHost = {
+        name: val,
+        server: '',
+        port: 22,
+        username: 'root',
+        protocol: 'sftp',
+        ssh_port: 22,
+        ssh_username: 'root',
+        ssh_auth_mode: 'password',
+        ssh_private_key: '',
+        password_hash: '',
+        ssh_password_hash: ''
+      };
+    } else if (currentHost) {
+      if (key === 'hostname') {
+        currentHost.server = val;
+      } else if (key === 'port') {
+        const portNum = parseInt(val) || 22;
+        currentHost.port = portNum;
+        currentHost.ssh_port = portNum;
+      } else if (key === 'user') {
+        currentHost.username = val;
+        currentHost.ssh_username = val;
+      } else if (key === 'identityfile') {
+        currentHost.ssh_auth_mode = 'key';
+        let keyPath = val;
+        if (keyPath.startsWith('~/')) {
+          keyPath = path.join(os.homedir(), keyPath.slice(2));
+        } else if (keyPath.startsWith('~')) {
+          keyPath = path.join(os.homedir(), keyPath.slice(1));
+        }
+        
+        try {
+          if (fs.existsSync(keyPath)) {
+            currentHost.ssh_private_key = fs.readFileSync(keyPath, 'utf8');
+          } else {
+            currentHost.ssh_private_key = `# IdentityFile: ${val}`;
+          }
+        } catch (e) {
+          currentHost.ssh_private_key = `# IdentityFile (unreadable): ${val}`;
+        }
+      }
+    }
+  }
+
+  if (currentHost && currentHost.server) {
+    connections.push(currentHost);
+  }
+
+  return connections;
+}
+
+// Import SSH config file
+router.post('/ssh-config/import', terminalUpload.single('file'), async (req: Request, res: Response) => {
+  try {
+    let content = '';
+    if (req.file) {
+      content = await fs.readFile(req.file.path, 'utf8');
+      await fs.remove(req.file.path);
+    } else if (req.body.configText) {
+      content = req.body.configText;
+    } else {
+      res.status(400).json({ success: false, message: 'Provide file upload or configText' });
+      return;
+    }
+
+    const imported = parseSshConfig(content);
+    if (imported.length === 0) {
+      res.json({ success: true, message: 'No valid Host configurations found in file.', count: 0 });
+      return;
+    }
+
+    const db = await getDb();
+    let importedCount = 0;
+    
+    await db.exec('BEGIN TRANSACTION;');
+    try {
+      for (const conn of imported) {
+        const existing = await db.get(
+          'SELECT id FROM ftp_connections WHERE server = ? AND username = ?',
+          [conn.server, conn.username]
+        );
+        if (existing) continue;
+
+        await db.run(
+          `INSERT INTO ftp_connections (name, server, port, username, protocol, ssh_port, ssh_username, ssh_auth_mode, ssh_private_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            conn.name,
+            conn.server,
+            conn.port,
+            conn.username,
+            conn.protocol,
+            conn.ssh_port,
+            conn.ssh_username,
+            conn.ssh_auth_mode,
+            conn.ssh_private_key
+          ]
+        );
+        importedCount++;
+      }
+      await db.exec('COMMIT;');
+    } catch (err: any) {
+      await db.exec('ROLLBACK;');
+      throw err;
+    }
+
+    res.json({ success: true, message: `Successfully imported ${importedCount} connections`, count: importedCount });
   } catch (error: any) {
     res.status(500).json({ success: false, message: error.message });
   }
