@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import Editor from '@monaco-editor/react';
 import {
   Folder,
   File,
@@ -18,6 +19,10 @@ import {
   AlertCircle,
   Search,
   Database,
+  Star,
+  Lock,
+  Bookmark,
+  Clock,
 } from 'lucide-react';
 
 interface FileItem {
@@ -82,6 +87,18 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
   const [searchLoading, setSearchLoading] = useState(false);
   const [reindexing, setReindexing] = useState(false);
   const [targetDirectory, setTargetDirectory] = useState('/');
+  const [previewFile, setPreviewFile] = useState<{ path: string; name: string; content: string | null; loading: boolean } | null>(null);
+  const [chmodItem, setChmodItem] = useState<{ item: FileItem; fullPath: string; mode: string } | null>(null);
+  const [bookmarks, setBookmarks] = useState<string[]>([]);
+  const [showBookmarksList, setShowBookmarksList] = useState(false);
+
+  // P2 Group 1 States
+  const [selectedItems, setSelectedItems] = useState<string[]>([]);
+  const [bulkRenameModal, setBulkRenameModal] = useState<{ items: { oldName: string; newName: string }[] } | null>(null);
+  const [tagsAndNotes, setTagsAndNotes] = useState<Record<string, { tags: string[]; note: string }>>({});
+  const [editTagsNotes, setEditTagsNotes] = useState<{ path: string; name: string; tags: string[]; note: string } | null>(null);
+  const [recentFiles, setRecentFiles] = useState<string[]>([]);
+  const [showRecentFiles, setShowRecentFiles] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -222,6 +239,7 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
         navigateTo(fullPath);
         clearSearch();
       } else {
+        addToRecentFiles(fullPath);
         onOpenFile?.(fullPath);
       }
       return;
@@ -231,7 +249,208 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
     if (item.isDirectory) {
       navigateTo(fullPath);
     } else {
+      addToRecentFiles(fullPath);
       onOpenFile?.(fullPath);
+    }
+  };
+
+  // Load bookmarks
+  useEffect(() => {
+    if (!connectionId) {
+      setBookmarks([]);
+      return;
+    }
+    const stored = localStorage.getItem(`omnisync_bookmarks_${connectionId}`);
+    if (stored) {
+      try {
+        setBookmarks(JSON.parse(stored));
+      } catch (err) {
+        setBookmarks([]);
+      }
+    } else {
+      setBookmarks([]);
+    }
+  }, [connectionId]);
+
+  const handleToggleBookmark = () => {
+    if (!connectionId) return;
+    let newBookmarks = [...bookmarks];
+    if (bookmarks.includes(currentPath)) {
+      newBookmarks = newBookmarks.filter(b => b !== currentPath);
+    } else {
+      newBookmarks.push(currentPath);
+    }
+    setBookmarks(newBookmarks);
+    localStorage.setItem(`omnisync_bookmarks_${connectionId}`, JSON.stringify(newBookmarks));
+  };
+
+  const handleDeleteBookmark = (pathToDelete: string) => {
+    if (!connectionId) return;
+    const newBookmarks = bookmarks.filter(b => b !== pathToDelete);
+    setBookmarks(newBookmarks);
+    localStorage.setItem(`omnisync_bookmarks_${connectionId}`, JSON.stringify(newBookmarks));
+  };
+
+  // Handle file preview
+  const handlePreviewFile = async (filePath: string) => {
+    const fileName = filePath.split('/').pop() || 'File';
+    setPreviewFile({ path: filePath, name: fileName, content: null, loading: true });
+
+    try {
+      addToRecentFiles(filePath);
+      const res = await fetch(`/api/terminal/sessions/${sessionId}/file?path=${encodeURIComponent(filePath)}`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      const data = await res.json();
+      if (data.success) {
+        setPreviewFile(prev => prev ? { ...prev, content: data.content, loading: false } : null);
+      } else {
+        throw new Error(data.message);
+      }
+    } catch (err: any) {
+      alert('Failed to load file preview: ' + err.message);
+      setPreviewFile(null);
+    }
+  };
+
+  // Handle save chmod
+  const handleSaveChmod = async () => {
+    if (!chmodItem) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/terminal/sessions/${sessionId}/chmod`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: JSON.stringify({ 
+          path: chmodItem.fullPath, 
+          mode: chmodItem.mode 
+        }),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message);
+      setChmodItem(null);
+      fetchDir(currentPath);
+    } catch (err: any) {
+      setError('Chmod failed: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Load tags and notes
+  useEffect(() => {
+    if (!connectionId) return;
+    const stored = localStorage.getItem(`omnisync_tags_${connectionId}`);
+    if (stored) {
+      try {
+        setTagsAndNotes(JSON.parse(stored));
+      } catch {}
+    } else {
+      setTagsAndNotes({});
+    }
+  }, [connectionId]);
+
+  const saveTagsAndNotes = (updated: Record<string, { tags: string[]; note: string }>) => {
+    setTagsAndNotes(updated);
+    if (connectionId) {
+      localStorage.setItem(`omnisync_tags_${connectionId}`, JSON.stringify(updated));
+    }
+  };
+
+  // Load recent files
+  useEffect(() => {
+    if (!connectionId) return;
+    const stored = localStorage.getItem(`omnisync_recent_${connectionId}`);
+    if (stored) {
+      try {
+        setRecentFiles(JSON.parse(stored));
+      } catch {}
+    } else {
+      setRecentFiles([]);
+    }
+  }, [connectionId]);
+
+  const addToRecentFiles = (filePath: string) => {
+    setRecentFiles((prev) => {
+      const updated = [
+        filePath,
+        ...prev.filter((p) => p !== filePath),
+      ].slice(0, 10);
+      if (connectionId) {
+        localStorage.setItem(`omnisync_recent_${connectionId}`, JSON.stringify(updated));
+      }
+      return updated;
+    });
+  };
+
+  const handleArchiveItem = async (folderPath: string, type: 'zip' | 'tar' = 'zip') => {
+    setLoading(true);
+    try {
+      const archivePath = folderPath + (type === 'tar' ? '.tar.gz' : '.zip');
+      const res = await fetch(`/api/terminal/sessions/${sessionId}/archive`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: JSON.stringify({ folderPath, archivePath, type }),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message);
+      fetchDir(currentPath);
+    } catch (err: any) {
+      setError('Archive failed: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleExtractItem = async (archivePath: string) => {
+    setLoading(true);
+    try {
+      const extractPath = currentPath;
+      const res = await fetch(`/api/terminal/sessions/${sessionId}/extract`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: JSON.stringify({ archivePath, extractPath }),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message);
+      fetchDir(currentPath);
+    } catch (err: any) {
+      setError('Extract failed: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSaveBulkRename = async () => {
+    if (!bulkRenameModal) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/terminal/sessions/${sessionId}/bulk-rename`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: JSON.stringify({ dirPath: currentPath, items: bulkRenameModal.items }),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message);
+      setBulkRenameModal(null);
+      setSelectedItems([]);
+      fetchDir(currentPath);
+    } catch (err: any) {
+      setError('Bulk rename failed: ' + err.message);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -452,16 +671,74 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
           <Search size={12} />
         </button>
         {connectionId && (
-          <button
-            onClick={handleReindex}
-            disabled={reindexing}
-            className={`p-1 transition-colors rounded text-neutral-500 hover:text-orange-500 hover:bg-neutral-800 disabled:opacity-30`}
-            title="Rebuild index cache"
-          >
-            <Database size={12} className={reindexing ? 'animate-spin text-orange-500' : ''} />
-          </button>
+          <>
+            {/* Bookmark star toggle */}
+            <button
+              onClick={handleToggleBookmark}
+              className={`p-1 transition-colors rounded ${bookmarks.includes(currentPath) ? 'text-amber-500 hover:text-amber-400' : 'text-neutral-500 hover:text-orange-500 hover:bg-neutral-800'}`}
+              title={bookmarks.includes(currentPath) ? 'Remove Bookmark' : 'Bookmark Current Folder'}
+            >
+              <Star size={12} fill={bookmarks.includes(currentPath) ? 'currentColor' : 'none'} />
+            </button>
+
+            {/* Bookmarks List dropdown trigger */}
+            <button
+              onClick={() => setShowBookmarksList(prev => !prev)}
+              className={`p-1 transition-colors rounded relative ${showBookmarksList ? 'text-orange-500 bg-neutral-800' : 'text-neutral-500 hover:text-orange-500 hover:bg-neutral-800'}`}
+              title="Show Bookmarked Folders"
+            >
+              <Bookmark size={12} />
+              {bookmarks.length > 0 && (
+                <span className="absolute -top-1 -right-1 bg-orange-600 text-black font-bold font-mono text-[7px] w-2.5 h-2.5 rounded-full flex items-center justify-center">
+                  {bookmarks.length}
+                </span>
+              )}
+            </button>
+
+            {/* Recent Files dropdown trigger */}
+            <button
+              onClick={() => setShowRecentFiles(prev => !prev)}
+              className={`p-1 transition-colors rounded ${showRecentFiles ? 'text-orange-500 bg-neutral-800' : 'text-neutral-500 hover:text-orange-500 hover:bg-neutral-800'}`}
+              title="Recent Files"
+            >
+              <Clock size={12} />
+            </button>
+
+            <button
+              onClick={handleReindex}
+              disabled={reindexing}
+              className={`p-1 transition-colors rounded text-neutral-500 hover:text-orange-500 hover:bg-neutral-800 disabled:opacity-30`}
+              title="Rebuild index cache"
+            >
+              <Database size={12} className={reindexing ? 'animate-spin text-orange-500' : ''} />
+            </button>
+          </>
         )}
       </div>
+
+      {/* Multi-select Action Panel */}
+      {selectedItems.length > 0 && (
+        <div className="flex items-center justify-between px-3 py-1 bg-orange-950/20 border-b border-orange-500/20 text-[10px] font-mono text-orange-400 animate-in slide-in-from-top-1 duration-150 flex-shrink-0">
+          <span>{selectedItems.length} items selected</span>
+          <div className="flex gap-2">
+            <button
+              onClick={() => {
+                const renameItems = selectedItems.map(name => ({ oldName: name, newName: name }));
+                setBulkRenameModal({ items: renameItems });
+              }}
+              className="px-2 py-0.5 bg-orange-600 hover:bg-orange-500 text-black font-bold rounded text-[9px] transition-colors"
+            >
+              Bulk Rename
+            </button>
+            <button
+              onClick={() => setSelectedItems([])}
+              className="px-2 py-0.5 border border-neutral-800 hover:bg-neutral-800 rounded text-[9px] text-neutral-400 hover:text-neutral-200 transition-colors"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Breadcrumb */}
       {isEditingPath ? (
@@ -675,13 +952,38 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
             const isRenaming = renaming?.item.name === item.name;
             const displayName = isSearching ? item.name.split('/').pop() || item.name : item.name;
             const subPath = isSearching ? item.name.substring(0, item.name.lastIndexOf('/')) : '';
+            
+            const itemKey = joinPath(currentPath, item.name);
+            const itemTagsNotes = tagsAndNotes[itemKey] || { tags: [], note: '' };
+
             return (
               <div
                 key={item.name}
-                className="group flex items-center gap-1.5 px-2 py-1 hover:bg-neutral-900/80 cursor-default border-b border-neutral-800/20 transition-colors"
+                className={`group flex items-center gap-1.5 px-2 py-1 hover:bg-neutral-900/80 cursor-default border-b border-neutral-800/20 transition-colors ${
+                  selectedItems.includes(item.name) ? 'bg-orange-500/5' : ''
+                }`}
                 onDoubleClick={() => handleDoubleClick(item)}
                 onContextMenu={(e) => handleContextMenu(e, item)}
               >
+                {/* Multi-select Checkbox */}
+                {!isRenaming && (
+                  <input
+                    type="checkbox"
+                    checked={selectedItems.includes(item.name)}
+                    onChange={(e) => {
+                      e.stopPropagation();
+                      if (e.target.checked) {
+                        setSelectedItems(prev => [...prev, item.name]);
+                      } else {
+                        setSelectedItems(prev => prev.filter(name => name !== item.name));
+                      }
+                    }}
+                    className={`accent-orange-500 mr-0.5 rounded cursor-pointer transition-all ${
+                      selectedItems.length > 0 ? 'opacity-100 w-3 h-3' : 'opacity-0 group-hover:opacity-100 w-3 h-3'
+                    }`}
+                  />
+                )}
+
                 {/* Icon */}
                 {item.isDirectory ? (
                   <Folder size={13} className="text-orange-500/70 flex-shrink-0" />
@@ -716,6 +1018,30 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
                         in {subPath}
                       </span>
                     )}
+                  </span>
+                )}
+
+                {/* File tags indicator */}
+                {itemTagsNotes.tags.length > 0 && (
+                  <div className="flex gap-0.5 ml-1 flex-shrink-0">
+                    {itemTagsNotes.tags.map((tagColor, idx) => (
+                      <span
+                        key={idx}
+                        className="w-1.5 h-1.5 rounded-full"
+                        style={{ backgroundColor: tagColor }}
+                        title="Tag"
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {/* File note indicator */}
+                {itemTagsNotes.note && (
+                  <span
+                    className="text-neutral-500 hover:text-neutral-300 ml-1 cursor-help flex-shrink-0"
+                    title={itemTagsNotes.note}
+                  >
+                    📝
                   </span>
                 )}
 
@@ -785,6 +1111,16 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
               </button>
               <button
                 onClick={() => {
+                  handlePreviewFile(contextMenu.fullPath);
+                  setContextMenu(null);
+                }}
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs font-mono text-neutral-200 hover:bg-orange-500 hover:text-black transition-colors"
+              >
+                <Eye size={11} />
+                Preview File
+              </button>
+              <button
+                onClick={() => {
                   onDownloadFile?.(contextMenu.fullPath);
                   setContextMenu(null);
                 }}
@@ -807,6 +1143,18 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
               Open Folder
             </button>
           )}
+          
+          {/* Permissions (CHMOD) */}
+          <button
+            onClick={() => {
+              setChmodItem({ item: contextMenu.item, fullPath: contextMenu.fullPath, mode: contextMenu.item.permissions || '755' });
+              setContextMenu(null);
+            }}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs font-mono text-neutral-200 hover:bg-orange-500 hover:text-black transition-colors border-t border-neutral-800/40"
+          >
+            <Lock size={11} />
+            Permissions (CHMOD)
+          </button>
           <button
             onClick={() => {
               setRenaming({ item: contextMenu.item, fullPath: contextMenu.fullPath });
@@ -828,6 +1176,66 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
             <Trash2 size={11} />
             Delete
           </button>
+          {/* Zip/Unzip & Tags */}
+          {contextMenu.item.isDirectory ? (
+            <>
+              <button
+                onClick={() => {
+                  handleArchiveItem(contextMenu.fullPath, 'zip');
+                  setContextMenu(null);
+                }}
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs font-mono text-neutral-200 hover:bg-orange-500 hover:text-black transition-colors"
+              >
+                <span>📦</span>
+                Archive Folder (ZIP)
+              </button>
+              <button
+                onClick={() => {
+                  handleArchiveItem(contextMenu.fullPath, 'tar');
+                  setContextMenu(null);
+                }}
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs font-mono text-neutral-200 hover:bg-orange-500 hover:text-black transition-colors"
+              >
+                <span>📦</span>
+                Archive Folder (TAR.GZ)
+              </button>
+            </>
+          ) : (
+            (contextMenu.item.name.endsWith('.zip') ||
+             contextMenu.item.name.endsWith('.tar.gz') ||
+             contextMenu.item.name.endsWith('.tgz') ||
+             contextMenu.item.name.endsWith('.tar') ||
+             contextMenu.item.name.endsWith('.gz')) && (
+              <button
+                onClick={() => {
+                  handleExtractItem(contextMenu.fullPath);
+                  setContextMenu(null);
+                }}
+                className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs font-mono text-neutral-200 hover:bg-orange-500 hover:text-black transition-colors"
+              >
+                <span>📂</span>
+                Extract Archive
+              </button>
+            )
+          )}
+
+          <button
+            onClick={() => {
+              const currentTagsNotes = tagsAndNotes[contextMenu.fullPath] || { tags: [], note: '' };
+              setEditTagsNotes({
+                path: contextMenu.fullPath,
+                name: contextMenu.item.name,
+                tags: currentTagsNotes.tags,
+                note: currentTagsNotes.note
+              });
+              setContextMenu(null);
+            }}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs font-mono text-neutral-200 hover:bg-orange-500 hover:text-black transition-colors border-t border-neutral-800/40"
+          >
+            <span>🏷️</span>
+            Tags & Notes
+          </button>
+
           <button
             onClick={() => handleCopyPath(contextMenu.fullPath)}
             className="w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs font-mono text-neutral-200 hover:bg-orange-500 hover:text-black transition-colors border-t border-neutral-800/40"
@@ -890,8 +1298,412 @@ const SftpFileBrowser: React.FC<SftpFileBrowserProps> = ({
           <span className="text-[10px] font-mono text-neutral-400 truncate">{uploadProgress}</span>
         </div>
       )}
+
+      {/* Bookmarks dropdown list */}
+      {showBookmarksList && (
+        <div className="absolute top-8 right-2 bg-neutral-900 border border-neutral-800 backdrop-blur-md rounded-lg shadow-2xl py-1.5 z-40 w-56 animate-in fade-in slide-in-from-top-1 duration-150">
+          <div className="px-2.5 py-1 border-b border-neutral-800/80 pb-1.5 mb-1 flex items-center justify-between text-[9px] font-mono text-neutral-500 uppercase">
+            <span>Bookmarks</span>
+            <button onClick={() => setShowBookmarksList(false)} className="hover:text-neutral-300">
+              <X size={10} />
+            </button>
+          </div>
+          <div className="max-h-48 overflow-y-auto px-1 space-y-0.5">
+            {bookmarks.map((path) => (
+              <div
+                key={path}
+                className="flex items-center justify-between gap-1.5 px-2 py-1 hover:bg-neutral-800 rounded font-mono text-[10px] text-neutral-300 group"
+              >
+                <button
+                  onClick={() => {
+                    navigateTo(path);
+                    setShowBookmarksList(false);
+                  }}
+                  className="flex-1 truncate text-left hover:text-orange-400 transition-colors"
+                  title={path}
+                >
+                  {path === '/' ? '/' : path.split('/').pop() || path}
+                </button>
+                <button
+                  onClick={() => handleDeleteBookmark(path)}
+                  className="text-neutral-600 hover:text-rose-500 p-0.5 transition-colors opacity-0 group-hover:opacity-100"
+                  title="Remove Bookmark"
+                >
+                  <Trash2 size={10} />
+                </button>
+              </div>
+            ))}
+            {bookmarks.length === 0 && (
+              <div className="p-3 text-center text-[10px] font-mono text-neutral-600">
+                No bookmarks saved
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Permissions (CHMOD) Modal */}
+      {chmodItem && (() => {
+        const perms = getPermissionsFromRights(chmodItem.mode);
+        const updatePerm = (role: 'u' | 'g' | 'o', action: 'r' | 'w' | 'x', val: boolean) => {
+          const u = { ...perms.u };
+          const g = { ...perms.g };
+          const o = { ...perms.o };
+          if (role === 'u') u[action] = val;
+          if (role === 'g') g[action] = val;
+          if (role === 'o') o[action] = val;
+          
+          const octal = getOctalFromPermissions(u, g, o);
+          setChmodItem(prev => prev ? { ...prev, mode: octal } : null);
+        };
+
+        return (
+          <div className="absolute inset-0 bg-neutral-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-3">
+            <div className="bg-neutral-900 border border-neutral-800 rounded-xl w-full max-w-xs shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+              <div className="px-4 py-3 border-b border-neutral-800 bg-neutral-900/50 flex items-center gap-2">
+                <Lock size={13} className="text-orange-500" />
+                <span className="text-xs font-mono font-bold uppercase text-neutral-300">Permissions</span>
+              </div>
+              
+              <div className="p-4 space-y-4 font-mono text-[11px] text-neutral-300">
+                <div className="truncate">
+                  <span className="text-neutral-500">Name:</span> <span className="text-orange-400">{chmodItem.item.name}</span>
+                </div>
+
+                <div className="grid grid-cols-4 gap-2 text-center border border-neutral-800 bg-neutral-950/50 p-3 rounded">
+                  <div></div>
+                  <div className="text-neutral-500 font-bold">R</div>
+                  <div className="text-neutral-500 font-bold">W</div>
+                  <div className="text-neutral-500 font-bold">X</div>
+
+                  <div className="text-left text-neutral-400 font-bold">Owner</div>
+                  <input type="checkbox" checked={perms.u.r} onChange={(e) => updatePerm('u', 'r', e.target.checked)} className="accent-orange-500" />
+                  <input type="checkbox" checked={perms.u.w} onChange={(e) => updatePerm('u', 'w', e.target.checked)} className="accent-orange-500" />
+                  <input type="checkbox" checked={perms.u.x} onChange={(e) => updatePerm('u', 'x', e.target.checked)} className="accent-orange-500" />
+
+                  <div className="text-left text-neutral-400 font-bold">Group</div>
+                  <input type="checkbox" checked={perms.g.r} onChange={(e) => updatePerm('g', 'r', e.target.checked)} className="accent-orange-500" />
+                  <input type="checkbox" checked={perms.g.w} onChange={(e) => updatePerm('g', 'w', e.target.checked)} className="accent-orange-500" />
+                  <input type="checkbox" checked={perms.g.x} onChange={(e) => updatePerm('g', 'x', e.target.checked)} className="accent-orange-500" />
+
+                  <div className="text-left text-neutral-400 font-bold">Others</div>
+                  <input type="checkbox" checked={perms.o.r} onChange={(e) => updatePerm('o', 'r', e.target.checked)} className="accent-orange-500" />
+                  <input type="checkbox" checked={perms.o.w} onChange={(e) => updatePerm('o', 'w', e.target.checked)} className="accent-orange-500" />
+                  <input type="checkbox" checked={perms.o.x} onChange={(e) => updatePerm('o', 'x', e.target.checked)} className="accent-orange-500" />
+                </div>
+
+                <div className="flex items-center justify-between border-t border-neutral-800/80 pt-3">
+                  <span className="text-neutral-500 font-bold">Octal Mode:</span>
+                  <input
+                    type="text"
+                    maxLength={3}
+                    value={chmodItem.mode.replace(/[^0-7]/g, '') || ''}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val.length <= 3 && /^[0-7]*$/.test(val)) {
+                        setChmodItem(prev => prev ? { ...prev, mode: val } : null);
+                      }
+                    }}
+                    className="w-16 bg-neutral-950 border border-neutral-800 text-center font-bold text-orange-400 text-xs py-1 rounded focus:outline-none focus:border-neutral-700"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-800 bg-neutral-900/30">
+                <button
+                  onClick={() => setChmodItem(null)}
+                  className="px-3 py-1.5 text-[11px] font-mono text-neutral-400 hover:text-neutral-200 border border-neutral-800 rounded transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSaveChmod}
+                  className="px-4 py-1.5 text-[11px] font-mono font-bold bg-orange-500 hover:bg-orange-400 text-black border border-orange-600 rounded transition-colors"
+                >
+                  Apply
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* File Preview Modal */}
+      {previewFile && (
+        <div className="absolute inset-0 bg-neutral-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-xl w-full h-full max-w-2xl max-h-[85vh] shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="px-4 py-3 border-b border-neutral-800 bg-neutral-900/50 flex items-center justify-between">
+              <div className="flex items-center gap-2 font-mono text-xs">
+                <Eye size={13} className="text-orange-500" />
+                <span className="text-neutral-300 font-bold uppercase">File Preview:</span>
+                <span className="text-neutral-400 truncate max-w-[280px]" title={previewFile.path}>
+                  {previewFile.name}
+                </span>
+              </div>
+              <button
+                onClick={() => setPreviewFile(null)}
+                className="text-neutral-500 hover:text-neutral-300 transition-colors p-1"
+              >
+                <X size={14} />
+              </button>
+            </div>
+            
+            <div className="flex-1 overflow-hidden relative bg-neutral-950">
+              {previewFile.loading ? (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
+                  <Loader2 size={24} className="text-orange-500 animate-spin" />
+                  <span className="text-[10px] font-mono text-neutral-500">Fetching remote content...</span>
+                </div>
+              ) : (
+                <Editor
+                  height="100%"
+                  language={getLanguageFromExtension(previewFile.name)}
+                  theme="vs-dark"
+                  value={previewFile.content || ''}
+                  options={{
+                    readOnly: true,
+                    minimap: { enabled: false },
+                    fontSize: 11,
+                    fontFamily: 'ui-monospace, monospace',
+                    lineHeight: 18,
+                    scrollBeyondLastLine: false,
+                    automaticLayout: true,
+                  }}
+                />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Recent Files Dropdown */}
+      {showRecentFiles && (
+        <div className="absolute top-8 right-2 bg-neutral-900 border border-neutral-800 backdrop-blur-md rounded-lg shadow-2xl py-1.5 z-40 w-64 animate-in fade-in slide-in-from-top-1 duration-150">
+          <div className="px-2.5 py-1 border-b border-neutral-800/80 pb-1.5 mb-1 flex items-center justify-between text-[9px] font-mono text-neutral-500 uppercase">
+            <span>Recent Files</span>
+            <button onClick={() => setShowRecentFiles(false)} className="hover:text-neutral-300">
+              <X size={10} />
+            </button>
+          </div>
+          <div className="max-h-48 overflow-y-auto px-1 space-y-0.5">
+            {recentFiles.map((path) => (
+              <button
+                key={path}
+                onClick={() => {
+                  handlePreviewFile(path);
+                  setShowRecentFiles(false);
+                }}
+                className="w-full text-left px-2 py-1 hover:bg-neutral-800 rounded font-mono text-[10px] text-neutral-300 truncate hover:text-orange-400 transition-colors"
+                title={path}
+              >
+                {path.split('/').pop() || path}
+                <span className="text-[8px] text-neutral-600 block truncate">{path}</span>
+              </button>
+            ))}
+            {recentFiles.length === 0 && (
+              <div className="p-3 text-center text-[10px] font-mono text-neutral-600">
+                No recent files
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Rename Modal */}
+      {bulkRenameModal && (
+        <div className="absolute inset-0 bg-neutral-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-3">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-xl w-full max-w-md shadow-2xl flex flex-col max-h-[85vh] overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="px-4 py-3 border-b border-neutral-800 bg-neutral-900/50 flex items-center justify-between">
+              <span className="text-xs font-mono font-bold uppercase text-neutral-300">Bulk Rename Files</span>
+              <button onClick={() => setBulkRenameModal(null)} className="text-neutral-500 hover:text-neutral-300">
+                <X size={14} />
+              </button>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto p-4 space-y-3 font-mono text-[11px] text-neutral-300">
+              {bulkRenameModal.items.map((item, idx) => (
+                <div key={idx} className="space-y-1 border-b border-neutral-800/40 pb-2">
+                  <div className="text-neutral-500 truncate" title={item.oldName}>
+                    Old: <span className="text-neutral-400">{item.oldName}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-neutral-500 flex-shrink-0">New:</span>
+                    <input
+                      type="text"
+                      value={item.newName}
+                      onChange={(e) => {
+                        const updatedItems = [...bulkRenameModal.items];
+                        updatedItems[idx].newName = e.target.value;
+                        setBulkRenameModal({ items: updatedItems });
+                      }}
+                      className="flex-1 bg-neutral-950 border border-neutral-800 px-2 py-1 rounded text-neutral-200 focus:outline-none focus:border-orange-500"
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-800 bg-neutral-900/30">
+              <button
+                onClick={() => setBulkRenameModal(null)}
+                className="px-3 py-1.5 text-[11px] font-mono text-neutral-400 hover:text-neutral-200 border border-neutral-800 rounded transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveBulkRename}
+                className="px-4 py-1.5 text-[11px] font-mono font-bold bg-orange-500 hover:bg-orange-400 text-black border border-orange-600 rounded transition-colors"
+              >
+                Rename All
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tags & Notes Editor Modal */}
+      {editTagsNotes && (
+        <div className="absolute inset-0 bg-neutral-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-3">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-xl w-full max-w-xs shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="px-4 py-3 border-b border-neutral-800 bg-neutral-900/50 flex items-center justify-between">
+              <span className="text-xs font-mono font-bold uppercase text-neutral-300">File Tags & Notes</span>
+              <button onClick={() => setEditTagsNotes(null)} className="text-neutral-500 hover:text-neutral-300">
+                <X size={14} />
+              </button>
+            </div>
+            
+            <div className="p-4 space-y-4 font-mono text-[11px] text-neutral-300">
+              <div className="truncate">
+                <span className="text-neutral-500">File:</span> <span className="text-orange-400">{editTagsNotes.name}</span>
+              </div>
+
+              {/* Tag colors selection */}
+              <div>
+                <span className="block text-neutral-500 mb-1.5">Select Tags:</span>
+                <div className="flex gap-2">
+                  {['#ef4444', '#10b981', '#3b82f6', '#f59e0b', '#a855f7'].map((color) => {
+                    const active = editTagsNotes.tags.includes(color);
+                    return (
+                      <button
+                        key={color}
+                        onClick={() => {
+                          const newTags = active
+                            ? editTagsNotes.tags.filter(t => t !== color)
+                            : [...editTagsNotes.tags, color];
+                          setEditTagsNotes(prev => prev ? { ...prev, tags: newTags } : null);
+                        }}
+                        className="w-6 h-6 rounded-full transition-transform hover:scale-110 flex items-center justify-center"
+                        style={{ backgroundColor: color }}
+                      >
+                        {active && <span className="text-[10px] text-black font-bold">✓</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Note textarea */}
+              <div>
+                <span className="block text-neutral-500 mb-1">Add Note:</span>
+                <textarea
+                  value={editTagsNotes.note}
+                  onChange={(e) => setEditTagsNotes(prev => prev ? { ...prev, note: e.target.value } : null)}
+                  placeholder="Enter a brief note about this file..."
+                  rows={3}
+                  className="w-full bg-neutral-950 border border-neutral-800 p-2 text-neutral-200 text-xs rounded focus:outline-none focus:border-orange-500 resize-none"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-neutral-800 bg-neutral-900/30">
+              <button
+                onClick={() => setEditTagsNotes(null)}
+                className="px-3 py-1.5 text-[11px] font-mono text-neutral-400 hover:text-neutral-200 border border-neutral-800 rounded transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  const updated = { ...tagsAndNotes };
+                  if (editTagsNotes.tags.length === 0 && !editTagsNotes.note.trim()) {
+                    delete updated[editTagsNotes.path];
+                  } else {
+                    updated[editTagsNotes.path] = {
+                      tags: editTagsNotes.tags,
+                      note: editTagsNotes.note.trim()
+                    };
+                  }
+                  saveTagsAndNotes(updated);
+                  setEditTagsNotes(null);
+                }}
+                className="px-4 py-1.5 text-[11px] font-mono font-bold bg-orange-500 hover:bg-orange-400 text-black border border-orange-600 rounded transition-colors"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
+};
+
+// Helper to map file extensions to Monaco Editor languages
+const getLanguageFromExtension = (filename: string) => {
+  const ext = filename.split('.').pop()?.toLowerCase();
+  if (!ext) return 'plaintext';
+  const map: Record<string, string> = {
+    js: 'javascript', ts: 'typescript', jsx: 'javascript', tsx: 'typescript',
+    html: 'html', css: 'css', json: 'json', md: 'markdown',
+    py: 'python', sh: 'shell', bash: 'shell', yaml: 'yaml', yml: 'yaml',
+    sql: 'sql', xml: 'xml', c: 'c', cpp: 'cpp', rs: 'rust', go: 'go',
+    php: 'php', rb: 'ruby', cs: 'csharp'
+  };
+  return map[ext] || 'plaintext';
+};
+
+// Helper to parse SFTP style rights string (-rwxrwxrwx) to permission flags
+const getPermissionsFromRights = (rights: string) => {
+  const u = { r: false, w: false, x: false };
+  const g = { r: false, w: false, x: false };
+  const o = { r: false, w: false, x: false };
+  
+  if (rights && rights.length >= 3 && /^[0-7]+$/.test(rights)) {
+    // It is an octal string (e.g. "755")
+    const octVal = parseInt(rights, 8);
+    u.r = !!(octVal & 0o400);
+    u.w = !!(octVal & 0o200);
+    u.x = !!(octVal & 0o100);
+    g.r = !!(octVal & 0o040);
+    g.w = !!(octVal & 0o020);
+    g.x = !!(octVal & 0o010);
+    o.r = !!(octVal & 0o004);
+    o.w = !!(octVal & 0o002);
+    o.x = !!(octVal & 0o001);
+  } else if (rights && (rights.length === 9 || rights.length === 10)) {
+    // It is a rights string (e.g. "-rwxr-xr-x")
+    const str = rights.length === 10 ? rights.substring(1) : rights;
+    u.r = str[0] === 'r';
+    u.w = str[1] === 'w';
+    u.x = str[2] === 'x' || str[2] === 's' || str[2] === 't';
+    g.r = str[3] === 'r';
+    g.w = str[4] === 'w';
+    g.x = str[5] === 'x' || str[5] === 's' || str[5] === 't';
+    o.r = str[6] === 'r';
+    o.w = str[7] === 'w';
+    o.x = str[8] === 'x' || str[8] === 's' || str[8] === 't';
+  } else {
+    // Default fallback
+    u.r = true; u.w = true; u.x = false;
+    g.r = true; g.w = false; g.x = false;
+    o.r = true; o.w = false; o.x = false;
+  }
+  return { u, g, o };
+};
+
+// Helper to convert permission flags to octal string
+const getOctalFromPermissions = (u: any, g: any, o: any) => {
+  const getVal = (p: any) => (p.r ? 4 : 0) + (p.w ? 2 : 0) + (p.x ? 1 : 0);
+  return `${getVal(u)}${getVal(g)}${getVal(o)}`;
 };
 
 export default SftpFileBrowser;

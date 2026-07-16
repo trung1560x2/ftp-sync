@@ -29,6 +29,7 @@ interface TerminalSession {
   cleanupTimeout?: NodeJS.Timeout | null;
   connectPromise?: Promise<void> | null;
   sshPassword?: string;
+  isConnected?: boolean;
 }
 
 class SSHTerminalService {
@@ -99,21 +100,12 @@ class SSHTerminalService {
    * Connect SSH and open an interactive shell with PTY.
    * Shell output is forwarded via onData; onClose fires when the shell ends.
    */
-  async connect(
-    sessionId: string,
-    onData: (data: string) => void,
-    onClose: () => void
-  ): Promise<void> {
+    /** Establish the base SSH connection if not already connected */
+  async connectSSH(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Session not found');
 
-    session.onData = onData;
-    session.onClose = onClose;
-
-    // Already connected — just keep the (updated) callbacks
-    if (session.shellStream) return;
-    // Connect already in flight (e.g. duplicate terminal:open) — await the same attempt
-    // instead of calling ssh2 connect() twice on one Client, which resets both
+    if (session.isConnected) return;
     if (session.connectPromise) return session.connectPromise;
 
     let host: string, port: number, username: string;
@@ -124,7 +116,6 @@ class SSHTerminalService {
     };
 
     if (session.quickConfig) {
-      // Quick connect — config stored on session
       host = session.quickConfig.host;
       port = session.quickConfig.port;
       username = session.quickConfig.username;
@@ -138,7 +129,6 @@ class SSHTerminalService {
         session.sshPassword = session.quickConfig.password;
       }
     } else {
-      // Saved connection — read from DB
       const db = await getDb();
       const conn = await db.get('SELECT * FROM ftp_connections WHERE id = ?', session.connectionId);
       if (!conn) throw new Error('Connection not found');
@@ -178,40 +168,18 @@ class SSHTerminalService {
         const fingerprint = `SHA256:${hash}`;
 
         if (knownKeys.length === 0) {
-          // Unknown host
-          this.onHostKeyVerify?.(sessionId, {
-            host,
-            keyType,
-            fingerprint,
-            isMismatch: false
-          });
+          this.onHostKeyVerify?.(sessionId, { host, keyType, fingerprint, isMismatch: false });
           return false;
         }
-
         const match = knownKeys.find((k) => k.key_type === keyType);
         if (!match) {
-          // Known host but new key type
-          this.onHostKeyVerify?.(sessionId, {
-            host,
-            keyType,
-            fingerprint,
-            isMismatch: false
-          });
+          this.onHostKeyVerify?.(sessionId, { host, keyType, fingerprint, isMismatch: false });
           return false;
         }
-
         if (match.fingerprint !== fingerprint) {
-          // Mismatch! Key changed
-          this.onHostKeyVerify?.(sessionId, {
-            host,
-            keyType,
-            fingerprint,
-            isMismatch: true,
-            existingFingerprint: match.fingerprint
-          });
+          this.onHostKeyVerify?.(sessionId, { host, keyType, fingerprint, isMismatch: true, existingFingerprint: match.fingerprint });
           return false;
         }
-
         return true;
       } catch (err) {
         console.error('[SSH Terminal] hostVerifier exception:', err);
@@ -220,52 +188,20 @@ class SSHTerminalService {
     };
 
     const connectAttempt = new Promise<void>((resolve, reject) => {
-      session.sshClient.on('ready', () => {
-        session.sshClient.shell(
-          {
-            term: 'xterm-256color',
-            cols: session.cols,
-            rows: session.rows,
-          },
-          (err, stream) => {
-            if (err) {
-              reject(err);
-              return;
-            }
-
-            session.shellStream = stream;
-
-            stream.on('data', (data: Buffer) => {
-              const str = data.toString('utf-8');
-              session.outputBuffer = (session.outputBuffer + str).slice(-100000);
-              session.onData?.(str);
-            });
-
-            stream.stderr.on('data', (data: Buffer) => {
-              const str = data.toString('utf-8');
-              session.outputBuffer = (session.outputBuffer + str).slice(-100000);
-              session.onData?.(str);
-            });
-
-            stream.on('close', () => {
-              session.onClose?.();
-              this.closeSession(sessionId);
-            });
-
-            resolve();
-          }
-        );
+      session.sshClient.once('ready', () => {
+        session.isConnected = true;
+        resolve();
       });
 
-      session.sshClient.on('error', (err) => {
+      session.sshClient.once('error', (err) => {
         console.error(`[SSH Terminal] Session ${sessionId} error:`, err.message);
-        session.onClose?.();
+        session.isConnected = false;
         this.closeSession(sessionId);
         reject(err);
       });
 
-      session.sshClient.on('end', () => {
-        session.onClose?.();
+      session.sshClient.once('end', () => {
+        session.isConnected = false;
         this.closeSession(sessionId);
       });
 
@@ -276,6 +212,60 @@ class SSHTerminalService {
       session.connectPromise = null;
     });
     return session.connectPromise;
+  }
+  async connect(
+    sessionId: string,
+    onData: (data: string) => void,
+    onClose: () => void
+  ): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error('Session not found');
+
+    session.onData = onData;
+    session.onClose = onClose;
+
+    if (session.shellStream) return;
+
+    // Ensure SSH is connected
+    await this.connectSSH(sessionId);
+
+    // Spawn shell
+    return new Promise<void>((resolve, reject) => {
+      session.sshClient.shell(
+        {
+          term: 'xterm-256color',
+          cols: session.cols,
+          rows: session.rows,
+        },
+        (err, stream) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+
+          session.shellStream = stream;
+
+          stream.on('data', (data: Buffer) => {
+            const str = data.toString('utf-8');
+            session.outputBuffer = (session.outputBuffer + str).slice(-100000);
+            session.onData?.(str);
+          });
+
+          stream.stderr.on('data', (data: Buffer) => {
+            const str = data.toString('utf-8');
+            session.outputBuffer = (session.outputBuffer + str).slice(-100000);
+            session.onData?.(str);
+          });
+
+          stream.on('close', () => {
+            session.onClose?.();
+            this.closeSession(sessionId);
+          });
+
+          resolve();
+        }
+      );
+    });
   }
 
   /** Forward keystrokes to the shell */
@@ -398,6 +388,7 @@ class SSHTerminalService {
   async getCwd(sessionId: string): Promise<string> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Session not found');
+    if (!session.isConnected) { await this.connectSSH(sessionId); }
 
     return new Promise<string>((resolve, reject) => {
       // Robust shell script to query CWD of the user's interactive shell process
@@ -455,6 +446,7 @@ pwd
   ): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Session not found');
+    if (!session.isConnected) { await this.connectSSH(sessionId); }
 
     return new Promise<void>((resolve, reject) => {
       session.sshClient.sftp((err, sftp) => {
@@ -543,6 +535,7 @@ pwd
   async getFile(sessionId: string, remotePath: string, useSudo: boolean = false): Promise<string> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Session not found');
+    if (!session.isConnected) { await this.connectSSH(sessionId); }
 
     if (useSudo) {
       return this.getFileWithSudo(session, remotePath);
@@ -613,6 +606,7 @@ pwd
   async downloadFile(sessionId: string, remotePath: string): Promise<{ buffer: Buffer; size: number }> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Session not found');
+    if (!session.isConnected) { await this.connectSSH(sessionId); }
 
     return new Promise((resolve, reject) => {
       session.sshClient.sftp((err, sftp) => {
@@ -651,6 +645,7 @@ pwd
   async saveFile(sessionId: string, remotePath: string, content: string, useSudo: boolean = false): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Session not found');
+    if (!session.isConnected) { await this.connectSSH(sessionId); }
 
     if (useSudo) {
       return this.saveFileWithSudo(session, remotePath, content);
@@ -803,6 +798,7 @@ pwd
   }[]> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Session not found');
+    if (!session.isConnected) { await this.connectSSH(sessionId); }
 
     return new Promise((resolve, reject) => {
       session.sshClient.sftp((err, sftp) => {
@@ -851,6 +847,7 @@ pwd
   }> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Session not found');
+    if (!session.isConnected) { await this.connectSSH(sessionId); }
 
     return new Promise((resolve, reject) => {
       session.sshClient.sftp((err, sftp) => {
@@ -881,6 +878,7 @@ pwd
   async mkdirRemote(sessionId: string, remotePath: string, useSudo: boolean = false): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Session not found');
+    if (!session.isConnected) { await this.connectSSH(sessionId); }
 
     if (useSudo) {
       const cmd = `sudo -S -p "" mkdir -p "${remotePath.replace(/"/g, '\\"')}"`;
@@ -917,6 +915,7 @@ pwd
   async rmdirRemote(sessionId: string, remotePath: string, useSudo: boolean = false): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Session not found');
+    if (!session.isConnected) { await this.connectSSH(sessionId); }
 
     if (useSudo) {
       const cmd = `sudo -S -p "" rm -rf "${remotePath.replace(/"/g, '\\"')}"`;
@@ -953,6 +952,7 @@ pwd
   async rmFile(sessionId: string, remotePath: string, useSudo: boolean = false): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Session not found');
+    if (!session.isConnected) { await this.connectSSH(sessionId); }
 
     if (useSudo) {
       const cmd = `sudo -S -p "" rm -f "${remotePath.replace(/"/g, '\\"')}"`;
@@ -989,6 +989,7 @@ pwd
   async renamePath(sessionId: string, oldPath: string, newPath: string, useSudo: boolean = false): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Session not found');
+    if (!session.isConnected) { await this.connectSSH(sessionId); }
 
     if (useSudo) {
       const cmd = `sudo -S -p "" mv "${oldPath.replace(/"/g, '\\"')}" "${newPath.replace(/"/g, '\\"')}"`;
@@ -1025,6 +1026,7 @@ pwd
   async execCommand(sessionId: string, cmd: string): Promise<string> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Session not found');
+    if (!session.isConnected) { await this.connectSSH(sessionId); }
 
     return new Promise<string>((resolve, reject) => {
       session.sshClient.exec(cmd, (err, stream) => {
@@ -1061,6 +1063,7 @@ pwd
   async chmodRemote(sessionId: string, remotePath: string, mode: number, recursive: boolean = false): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Session not found');
+    if (!session.isConnected) { await this.connectSSH(sessionId); }
 
     if (recursive) {
       const octalStr = mode.toString(8);
@@ -1109,6 +1112,7 @@ pwd
   private async getRemoteDirSizeSftp(sessionId: string, remotePath: string): Promise<{ size: number; count: number }> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('Session not found');
+    if (!session.isConnected) { await this.connectSSH(sessionId); }
 
     let size = 0;
     let count = 0;

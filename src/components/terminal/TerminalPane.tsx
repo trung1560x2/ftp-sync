@@ -19,6 +19,8 @@ interface TerminalPaneProps {
   onClose?: () => void;
   onTitleChange?: (title: string) => void;
   cwd?: string;
+  isBroadcastActive?: boolean;
+  onOpenFile?: (path: string, useSudo?: boolean) => void;
 }
 
 const TerminalPane: React.FC<TerminalPaneProps> = ({
@@ -28,6 +30,8 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
   onTitleChange,
   cwd,
   onClose,
+  isBroadcastActive,
+  onOpenFile,
 }) => {
   const { activeProfile, hoveredTheme } = useTerminalSettings();
   const [pasteConfirmText, setPasteConfirmText] = useState<string | null>(null);
@@ -120,6 +124,42 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
     term.loadAddon(fitAddon);
     term.loadAddon(webLinksAddon);
     term.loadAddon(searchAddon);
+
+    // Advanced Hyperlink & Path/File Detection (Ctrl+Click to open remote Monaco Editor)
+    term.registerLinkProvider({
+      provideLinks(bufferLineNumber, callback) {
+        const line = term.buffer.active.getLine(bufferLineNumber - 1);
+        if (!line) {
+          callback(undefined);
+          return;
+        }
+        const lineText = line.translateToString(true);
+        const pathRegex = /(?:[a-zA-Z]:\\|\/|\.\/|\.\.\/|~)[a-zA-Z0-9_\-\.\/\\~]+|[a-zA-Z0-9_\-]+\.[a-zA-Z0-9]+/g;
+        const links: any[] = [];
+        let match;
+        
+        while ((match = pathRegex.exec(lineText)) !== null) {
+          const text = match[0];
+          if (/^[0-9]+\.[0-9]+$/.test(text)) continue;
+          if (/^https?:\/\//i.test(text)) continue;
+
+          const startIndex = match.index;
+          const endIndex = startIndex + text.length;
+          
+          links.push({
+            range: {
+              start: { x: startIndex + 1, y: bufferLineNumber },
+              end: { x: endIndex, y: bufferLineNumber }
+            },
+            text,
+            activate(event: any, text: string) {
+              onOpenFile?.(text);
+            }
+          });
+        }
+        callback(links);
+      }
+    });
 
     // WebGL / Canvas accelerator
     if (useWebGL) {
@@ -677,6 +717,18 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
     return () => window.removeEventListener('terminal:open-file', handler);
   }, [handleOpenFile]);
 
+  // Listen for terminal:run-command to write commands to SSH stream
+  useEffect(() => {
+    const runCommandHandler = (e: Event) => {
+      const customEvent = e as CustomEvent<{ sessionId: string; command: string }>;
+      if (customEvent.detail.sessionId === currentSessionId.current && wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(`D:${currentSessionId.current}:${customEvent.detail.command}\n`);
+      }
+    };
+    window.addEventListener('terminal:run-command', runCommandHandler);
+    return () => window.removeEventListener('terminal:run-command', runCommandHandler);
+  }, []);
+
   // Apply active profile settings dynamically
   useEffect(() => {
     const term = xtermRef.current;
@@ -829,6 +881,24 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
     };
   }, [handleClearTerminal, handleExportLog]);
 
+  // Listen for broadcast keyboard inputs from other panes in same session group
+  useEffect(() => {
+    if (!isBroadcastActive || isActive) return;
+
+    const broadcastHandler = (e: Event) => {
+      const { senderSessionId, data } = (e as CustomEvent).detail;
+      if (senderSessionId !== currentSessionId.current) {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(`D:${currentSessionId.current}:${data}`);
+        }
+        xtermRef.current?.write(data);
+      }
+    };
+
+    window.addEventListener('terminal:broadcast-data', broadcastHandler);
+    return () => window.removeEventListener('terminal:broadcast-data', broadcastHandler);
+  }, [isBroadcastActive, isActive]);
+
   // Setup terminal and connect
   useEffect(() => {
     const term = initTerminal();
@@ -838,6 +908,15 @@ const TerminalPane: React.FC<TerminalPaneProps> = ({
     term.onData((data) => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(`D:${currentSessionId.current}:${data}`);
+      }
+
+      if (isBroadcastActive && isActive) {
+        window.dispatchEvent(new CustomEvent('terminal:broadcast-data', {
+          detail: {
+            senderSessionId: currentSessionId.current,
+            data: data
+          }
+        }));
       }
     });
 

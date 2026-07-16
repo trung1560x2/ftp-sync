@@ -25,8 +25,12 @@ import {
   RotateCcw,
   AlertTriangle,
   FileText,
+  ChevronLeft,
+  ChevronRight,
+  Activity,
 } from 'lucide-react';
 import { useTerminalSettings, terminalSettingsStore, MONOSPACE_FONTS, TERMINAL_THEMES, TerminalProfile } from '../../stores/terminalSettingsStore';
+import ServerMonitorPanel from './ServerMonitorPanel';
 
 interface Connection {
   id: number;
@@ -63,6 +67,16 @@ const TerminalView: React.FC = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [quickConnecting, setQuickConnecting] = useState(false);
   const [quickError, setQuickError] = useState('');
+  const [quickConnectHistory, setQuickConnectHistory] = useState<{ host: string; port: string; username: string; authMode: 'password' | 'key' }[]>([]);
+
+  useEffect(() => {
+    const stored = localStorage.getItem('omnisync_quick_connect_history');
+    if (stored) {
+      try {
+        setQuickConnectHistory(JSON.parse(stored));
+      } catch {}
+    }
+  }, []);
 
   // Path dialog for toolbar Download / Open File
   const [showPathDialog, setShowPathDialog] = useState<{ mode: 'download' | 'open' } | null>(null);
@@ -72,6 +86,7 @@ const TerminalView: React.FC = () => {
 
   // SFTP File Browser panel
   const [showSftpPanel, setShowSftpPanel] = useState(false);
+  const [showMonitorPanel, setShowMonitorPanel] = useState(false);
 
   // Fetch available connections
   useEffect(() => {
@@ -260,6 +275,54 @@ const TerminalView: React.FC = () => {
     );
   }, []);
 
+  const handleTerminalOpenFile = useCallback((sessionId: string, remotePath: string) => {
+    window.dispatchEvent(new CustomEvent('terminal:open-file', {
+      detail: { sessionId, remotePath, useSudo: false }
+    }));
+  }, []);
+
+  const handleDuplicateTab = useCallback(async (tabId: string) => {
+    const tab = tabs.find((t) => t.id === tabId);
+    if (!tab || !tab.connectionId) return;
+
+    try {
+      let startCwd = '/';
+      try {
+        const cwdRes = await fetch(`/api/terminal/sessions/${tab.sessionId}/cwd`);
+        const cwdData = await cwdRes.json();
+        if (cwdData.success) startCwd = cwdData.cwd;
+      } catch {}
+
+      if (tab.connectionId > 0) {
+        const res = await fetch('/api/terminal/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ connectionId: tab.connectionId }),
+        });
+        const data = await res.json();
+        if (!data.success) throw new Error(data.message || 'Failed to duplicate session');
+
+        const newTabId = generateId();
+        const newTab: TerminalTab = {
+          id: newTabId,
+          sessionId: data.sessionId,
+          connectionId: tab.connectionId,
+          title: `${tab.title} (Copy)`,
+          isConnected: false,
+          color: tab.color,
+          cwd: startCwd
+        };
+
+        setTabs((prev) => [...prev, newTab]);
+        setActiveTabId(newTabId);
+      } else {
+        alert('Cannot duplicate a temporary quick connect session.');
+      }
+    } catch (err: any) {
+      alert('Failed to duplicate tab: ' + err.message);
+    }
+  }, [tabs]);
+
   const handleImportSshConfig = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -292,6 +355,101 @@ const TerminalView: React.FC = () => {
     } finally {
       e.target.value = '';
     }
+  }, []);
+
+  const handleExportConnections = useCallback(() => {
+    const exportData = connections.map(c => ({
+      name: c.name,
+      server: c.server,
+      port: c.ssh_port || 22,
+      username: c.ssh_username || 'root'
+    }));
+    
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `omnisync_connections_${new Date().toISOString().split('T')[0]}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [connections]);
+
+  const handleImportThirdPartyConnections = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      const text = event.target?.result as string;
+      if (!text) return;
+
+      let imported: ConnectionImportTemplate[] = [];
+      const filename = file.name.toLowerCase();
+
+      try {
+        if (filename.endsWith('.reg')) {
+          imported = parsePuTTYReg(text);
+        } else if (filename.endsWith('.mxtpro') || filename.endsWith('.ini')) {
+          imported = parseMobaXterm(text);
+        } else if (filename.endsWith('.json')) {
+          const parsed = JSON.parse(text);
+          if (Array.isArray(parsed)) {
+            imported = parsed.map(c => ({
+              name: c.name || c.server || 'Terminal',
+              server: c.server || c.host || c.hostname,
+              port: parseInt(c.port) || 22,
+              username: c.username || c.user || 'root'
+            }));
+          } else {
+            imported = parseTermius(parsed);
+          }
+        } else {
+          throw new Error('Unsupported connection import file format.');
+        }
+
+        if (imported.length === 0) {
+          throw new Error('No connections found in file.');
+        }
+
+        let successCount = 0;
+        for (const s of imported) {
+          try {
+            const res = await fetch('/api/ftp-connections', {
+              method: 'POST',
+              headers: { 
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${localStorage.getItem('token')}`
+              },
+              body: JSON.stringify({
+                name: s.name,
+                server: s.server,
+                port: s.port,
+                username: s.username,
+                protocol: 'sftp',
+                secure: true
+              })
+            });
+            const data = await res.json();
+            if (data.id) successCount++;
+          } catch {
+            // ignore
+          }
+        }
+
+        alert(`Successfully imported ${successCount} of ${imported.length} connections!`);
+        
+        // Refresh connection list
+        fetch('/api/ftp-connections')
+          .then((res) => res.json())
+          .then((data) => setConnections(Array.isArray(data) ? data : []))
+          .catch(console.error);
+        setShowConnectionPicker(false);
+      } catch (err: any) {
+        alert('Failed to parse connections: ' + err.message);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
   }, []);
 
   const generateId = () => crypto.randomUUID?.() || Math.random().toString(36).slice(2);
@@ -380,6 +538,18 @@ const TerminalView: React.FC = () => {
         }
         return updated;
       });
+      
+      // Save to history
+      setQuickConnectHistory((prev) => {
+        const item = { host: quickHost, port: quickPort, username: quickUsername, authMode: quickAuthMode };
+        const updated = [
+          item,
+          ...prev.filter((h) => !(h.host === quickHost && h.username === quickUsername && h.port === quickPort)),
+        ].slice(0, 10);
+        localStorage.setItem('omnisync_quick_connect_history', JSON.stringify(updated));
+        return updated;
+      });
+
       setActiveTabId(tabId);
       setShowQuickConnect(false);
       // Reset form
@@ -863,6 +1033,7 @@ const TerminalView: React.FC = () => {
         isActive={true}
         onTitleChange={(title) => handleTitleChange(activeTab.id, title)}
         cwd={activeTab.cwd}
+        onOpenFile={(path) => handleTerminalOpenFile(activeTab.sessionId, path)}
       />
     );
   };
@@ -957,6 +1128,31 @@ const TerminalView: React.FC = () => {
 
           {/* Form */}
           <div className="p-4 space-y-4">
+            {/* Recent Quick Connections */}
+            {quickConnectHistory.length > 0 && (
+              <div className="border border-neutral-800/60 bg-neutral-950/40 rounded p-2">
+                <span className="block text-[9px] font-mono text-neutral-500 uppercase tracking-wider mb-1.5">
+                  Recent Quick Connections
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {quickConnectHistory.map((item, idx) => (
+                    <button
+                      key={idx}
+                      onClick={() => {
+                        setQuickHost(item.host);
+                        setQuickPort(item.port);
+                        setQuickUsername(item.username);
+                        setQuickAuthMode(item.authMode);
+                      }}
+                      className="px-2 py-1 bg-neutral-900 border border-neutral-800 hover:border-orange-500/50 hover:text-orange-400 rounded text-[10px] font-mono transition-all text-neutral-300"
+                    >
+                      {item.username}@{item.host}:{item.port}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Host + Port */}
             <div className="flex gap-3">
               <div className="flex-1">
@@ -1166,6 +1362,44 @@ const TerminalView: React.FC = () => {
               onChange={handleImportSshConfig}
             />
 
+            {/* Import from PuTTY/Termius/MobaXterm */}
+            <button
+              onClick={() => {
+                const fileInput = document.getElementById('third-party-connections-import');
+                fileInput?.click();
+              }}
+              className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-orange-600/10 transition-colors text-left border-b border-neutral-800/50 mb-1"
+            >
+              <Download size={14} className="text-orange-500" />
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-mono text-orange-400">Import Session Backup</div>
+                <div className="text-[10px] font-mono text-neutral-600">
+                  Import from PuTTY (.reg), MobaXterm (.mxtpro), or Termius (.json)
+                </div>
+              </div>
+            </button>
+            <input
+              id="third-party-connections-import"
+              type="file"
+              accept=".reg,.mxtpro,.ini,.json"
+              style={{ display: 'none' }}
+              onChange={handleImportThirdPartyConnections}
+            />
+
+            {/* Export Connections */}
+            <button
+              onClick={handleExportConnections}
+              className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-orange-600/10 transition-colors text-left border-b border-neutral-800/50 mb-1"
+            >
+              <Download size={14} className="text-orange-500" />
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-mono text-orange-400">Export Connections List</div>
+                <div className="text-[10px] font-mono text-neutral-600">
+                  Download connection templates as JSON
+                </div>
+              </div>
+            </button>
+
             {/* Saved connections */}
             {connections.map((conn) => (
               <button
@@ -1241,6 +1475,7 @@ const TerminalView: React.FC = () => {
                 onNewTab={handleNewTab}
                 onUpdateTabColor={handleUpdateTabColor}
                 onRenameTab={handleRenameTab}
+                onDuplicateTab={handleDuplicateTab}
               />
 
               {/* Toolbar */}
@@ -1308,6 +1543,16 @@ const TerminalView: React.FC = () => {
                     disabled={!activeTabId}
                   >
                     <FolderOpen size={13} />
+                  </button>
+
+                  {/* Server Monitor Panel Toggle */}
+                  <button
+                    onClick={() => setShowMonitorPanel(!showMonitorPanel)}
+                    className={`p-1.5 transition-colors rounded ${showMonitorPanel ? 'text-orange-500 bg-neutral-800' : 'text-neutral-500 hover:text-orange-500 hover:bg-neutral-800'} disabled:opacity-50 disabled:cursor-not-allowed`}
+                    title={showMonitorPanel ? 'Hide Server Monitor' : 'Show Server Monitor'}
+                    disabled={!activeTabId}
+                  >
+                    <Activity size={13} />
                   </button>
 
                   {/* Separator */}
@@ -1408,7 +1653,25 @@ const TerminalView: React.FC = () => {
                       }
                     }}
                   />
+                  {showMonitorPanel ? (
+                    <SplitContainer direction="horizontal" initialRatio={0.7}>
+                      {renderTerminalArea()}
+                      <ServerMonitorPanel
+                        sessionId={getActiveSessionId()!}
+                        connectionId={activeTab?.connectionId}
+                      />
+                    </SplitContainer>
+                  ) : (
+                    renderTerminalArea()
+                  )}
+                </SplitContainer>
+              ) : showMonitorPanel && tabs.length > 0 && getActiveSessionId() ? (
+                <SplitContainer direction="horizontal" initialRatio={0.75}>
                   {renderTerminalArea()}
+                  <ServerMonitorPanel
+                    sessionId={getActiveSessionId()!}
+                    connectionId={activeTab?.connectionId}
+                  />
                 </SplitContainer>
               ) : (
                 renderTerminalArea()
@@ -1532,6 +1795,124 @@ const TerminalView: React.FC = () => {
       )}
     </div>
   );
+};
+
+// Helper Interfaces and parsing functions for connection imports
+interface ConnectionImportTemplate {
+  name: string;
+  server: string;
+  port: number;
+  username: string;
+}
+
+const parsePuTTYReg = (text: string): ConnectionImportTemplate[] => {
+  const sessions: ConnectionImportTemplate[] = [];
+  const blocks = text.split(/\[HKEY_CURRENT_USER\\Software\\SimonTatham\\PuTTY\\Sessions\\/gi);
+  
+  for (let i = 1; i < blocks.length; i++) {
+    const block = blocks[i];
+    const lines = block.split(/\r?\n/);
+    const sessionNameRaw = lines[0].replace(/\]/g, '').trim();
+    const sessionName = decodeURIComponent(sessionNameRaw);
+    
+    let host = '';
+    let port = 22;
+    let username = 'root';
+    
+    for (const line of lines) {
+      if (line.startsWith('"HostName"=')) {
+        host = line.split('=')[1].replace(/"/g, '').trim();
+      } else if (line.startsWith('"PortNumber"=')) {
+        const hex = line.split('dword:')[1]?.trim();
+        if (hex) {
+          port = parseInt(hex, 16) || 22;
+        }
+      } else if (line.startsWith('"UserName"=')) {
+        username = line.split('=')[1].replace(/"/g, '').trim();
+      }
+    }
+    
+    if (host) {
+      sessions.push({ name: sessionName, server: host, port, username });
+    }
+  }
+  return sessions;
+};
+
+const parseMobaXterm = (text: string): ConnectionImportTemplate[] => {
+  const sessions: ConnectionImportTemplate[] = [];
+  const lines = text.split(/\r?\n/);
+  
+  let currentSession: Partial<ConnectionImportTemplate> = {};
+  
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      if (currentSession.server) {
+        sessions.push({
+          name: currentSession.name || currentSession.server,
+          server: currentSession.server,
+          port: currentSession.port || 22,
+          username: currentSession.username || 'root'
+        });
+      }
+      currentSession = { name: trimmed.slice(1, -1) };
+    } else if (trimmed.includes('=')) {
+      const [key, ...valParts] = trimmed.split('=');
+      const val = valParts.join('=').trim();
+      if (key.toLowerCase() === 'address') {
+        currentSession.server = val;
+      } else if (key.toLowerCase() === 'port') {
+        currentSession.port = parseInt(val) || 22;
+      } else if (key.toLowerCase() === 'username') {
+        currentSession.username = val;
+      } else if (key.toLowerCase() === 'title') {
+        currentSession.name = val;
+      }
+    }
+  }
+  
+  if (currentSession.server) {
+    sessions.push({
+      name: currentSession.name || currentSession.server,
+      server: currentSession.server,
+      port: currentSession.port || 22,
+      username: currentSession.username || 'root'
+    });
+  }
+  return sessions;
+};
+
+const parseTermius = (data: any): ConnectionImportTemplate[] => {
+  const sessions: ConnectionImportTemplate[] = [];
+  
+  const extractFromObject = (obj: any) => {
+    if (Array.isArray(obj)) {
+      obj.forEach(extractFromObject);
+      return;
+    }
+    
+    if (obj && typeof obj === 'object') {
+      const host = obj.address || obj.hostname || obj.host || obj.ip;
+      if (host && typeof host === 'string') {
+        sessions.push({
+          name: obj.label || obj.name || host,
+          server: host,
+          port: parseInt(obj.port) || 22,
+          username: obj.username || obj.user || 'root'
+        });
+      }
+      
+      for (const key of Object.keys(obj)) {
+        if (typeof obj[key] === 'object') {
+          extractFromObject(obj[key]);
+        }
+      }
+    }
+  };
+  
+  extractFromObject(data);
+  return sessions;
 };
 
 export default TerminalView;

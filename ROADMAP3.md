@@ -57,9 +57,11 @@
 | WS fast-path | `WebSocketService.ts:37` | `D:`/`O:` prefix, tránh JSON overhead |
 | Download file | `SSHTerminalService.ts:534` | Binary-safe |
 | Context menu | `TerminalPane.tsx:47` | Copy/paste cơ bản |
+| Remote Process Monitor | `ServerMonitorPanel.tsx` | Parse top/ps, list processes, kill process |
+| System Resource Dashboard | `ServerMonitorPanel.tsx` | Recharts CPU/RAM/Disk/Network realtime graph |
 
 ### Thiếu / yếu (gap)
-- Không có: scrollback search nâng cao, command history persistent, snippet template với biến, multi-hop SSH, agent forwarding, port forward (table dead), keygen, terminal recording, session lock, audit log, live monitor (top/htop), log viewer, file watcher, clipboard history, autocomplete, syntax highlight output, themes, profiles, keyboard customization, broadcast input, snapshot, export, find in scrollback, regex search, mark/jump, tmux integration, zellij, custom keybindings, font ligature, truecolor picker, hyperlinks, OSC sequences, notification bell, idle detect, session rename, session group, connection group, proxy jump, SOCKS, health dashboard, reconnect queue, credential rotation, SSH config import, known_hosts mgmt, fingerprint verify, 2FA SSH, MFA, session share, co-browsing, terminal cast (asciinema), macro recorder, expect script, autossh keepalive, connection multiplexing, SCP, rsync, tar streaming, checksum, diff remote file, image preview, PDF preview, hex viewer, binary diff, file watcher trigger, log tail, journalctl, docker exec, kubectl exec, database client, REST client, port scanner, process manager, cron editor, env var manager, workspace, project mode, etc.
+- Không có: scrollback search nâng cao, command history persistent, snippet template với biến, multi-hop SSH, agent forwarding, port forward (table dead), keygen, terminal recording, session lock, audit log, log viewer, file watcher, clipboard history, autocomplete, syntax highlight output, themes, profiles, keyboard customization, broadcast input, snapshot, export, find in scrollback, regex search, mark/jump, tmux integration, zellij, custom keybindings, font ligature, truecolor picker, hyperlinks, OSC sequences, notification bell, idle detect, session rename, session group, connection group, proxy jump, SOCKS, health dashboard, reconnect queue, credential rotation, SSH config import, known_hosts mgmt, fingerprint verify, 2FA SSH, MFA, session share, co-browsing, terminal cast (asciinema), macro recorder, expect script, autossh keepalive, connection multiplexing, SCP, rsync, tar streaming, checksum, diff remote file, image preview, PDF preview, hex viewer, binary diff, file watcher trigger, log tail, journalctl, docker exec, kubectl exec, database client, REST client, port scanner, process manager, cron editor, env var manager, workspace, project mode, etc.
 
 ---
 
@@ -105,9 +107,9 @@ Thay canvas 2D bằng WebGL renderer cho terminal lớn (100K dòng scrollback) 
 - Fallback canvas 2D nếu WebGL unavailable
 Depends: none
 Tasks:
-- [ ] Cài `@xterm/addon-webgl`
-- [ ] Detect WebGL support, fallback
-- [ ] Benchmark before/after
+- [x] Cài `@xterm/addon-webgl`
+- [x] Detect WebGL support, fallback
+- [x] Benchmark before/after
 
 ### F[T.A.02] Unicode 11 + Grapheme Cluster — [P0] S
 xterm mới đã support, enable để hiển thị emoji, CJK, ZWJ đúng (hiện font JetBrains Mono).
@@ -123,10 +125,10 @@ Support 24-bit color (truecolor), marketplace theme like iTerm2.
 - Preview live
 Depends: none
 Tasks:
-- [ ] Theme store (zustand)
-- [ ] 20 preset themes
-- [ ] Import/export format iTerm2, Alacritty, Windows Terminal
-- [ ] Live preview
+- [x] Theme store (zustand)
+- [x] 20 preset themes
+- [x] Import/export format iTerm2, Alacritty, Windows Terminal
+- [x] Live preview
 
 ### F[T.A.04] Font Manager + Ligature — [P0] M
 Font picker, Fira Code ligature, fallback chain, powerline/Nerd Font.
@@ -137,9 +139,9 @@ Font picker, Fira Code ligature, fallback chain, powerline/Nerd Font.
 - Size + lineHeight + letterSpacing slider
 Depends: F[T.A.03]
 Tasks:
-- [ ] Font settings panel
-- [ ] Ligature enable via xterm `fontLigatures`
-- [ ] Nerd Font glyph test
+- [x] Font settings panel
+- [x] Ligature enable via xterm `fontLigatures`
+- [x] Nerd Font glyph test
 
 ### F[T.A.05] Custom Keybindings — [P0] M
 Tất cả action có shortcut, user edit được.
@@ -1103,21 +1105,20 @@ Depends: F[T.A.06]
 
 ## H. Monitoring & Visualization
 
-### F[T.H.01] Remote Process Monitor (top/htop) — [P0] M
+### F[T.H.01] Remote Process Monitor (top/htop) — [P0] M [DONE]
 Hiển thị CPU/RAM per process remote, sort, kill.
-- SSH `top -b` parse hoặc `ps aux`
-- Table: PID, CPU, RAM, command
-- Sort column
-- Kill button (SIGTERM/SIGKILL)
-- Refresh interval
+- [x] Đã hoàn thành: Parse command `top` / `ps aux`
+- [x] Table hiển thị: PID, CPU%, RAM%, Command
+- [x] Cho phép Sort theo các cột
+- [x] Nút Kill tiến trình (gửi lệnh kill PID qua SSH)
+- [x] Tùy chỉnh Refresh interval (3s, 5s, 10s...)
 Depends: F[T.C.05]
 
-### F[T.H.02] System Resource Dashboard — [P0] M
+### F[T.H.02] System Resource Dashboard — [P0] M [DONE]
 CPU/RAM/disk/network graph realtime, multi-server.
-- `top` / `/proc/stat` / `df` / `ifconfig`
-- Recharts live graph
-- Multi-server panel
-- Alert threshold
+- [x] Đã hoàn thành: Live dashboard vẽ đồ thị thông tin CPU, RAM, Disk IO, Network Bandwidth bằng Recharts.
+- [x] Hỗ trợ Multi-server panel
+- [x] Cảnh báo Alert threshold trực quan trên đồ thị
 Depends: F[T.H.01]
 
 ### F[T.H.03] Log Tail (follow) — [P0] M
@@ -1241,10 +1242,10 @@ Kích hoạt `port_forwards` table (hiện dead) — local (-L), remote (-R), dy
 - Log forwarded connection
 Depends: F[T.C.01]
 Tasks:
-- [ ] `PortForwardService.ts` (ssh2 forward)
-- [ ] Routes `/api/port-forwards`
-- [ ] UI list + add/edit
-- [ ] Auto-start
+- [x] `PortForwardService.ts` (ssh2 forward)
+- [x] Routes `/api/port-forwards`
+- [x] UI list + add/edit
+- [x] Auto-start
 
 ### F[T.I.02] SOCKS Proxy Manager — [P1] S
 Dynamic port forward → SOCKS5 proxy, dùng cho browser/app.
@@ -1913,8 +1914,8 @@ Depends: F[T.K.02]
 | F[T.G.01] | Search Scrollback regex | Search | S |
 | F[T.G.08] | Copy Output as HTML/ANSI | Search | S |
 | F[T.G.09] | Export Session (asciinema) | Search | S |
-| F[T.H.01] | Remote Process Monitor | Monitor | M |
-| F[T.H.02] | System Resource Dashboard | Monitor | M |
+| F[T.H.01] | Remote Process Monitor [DONE] | Monitor | M |
+| F[T.H.02] | System Resource Dashboard [DONE] | Monitor | M |
 | F[T.H.03] | Log Tail (follow) | Monitor | M |
 | F[T.I.01] | Port Forwarding UI | Tunnel | M |
 | F[T.J.01] | Session Lock | Security | S |

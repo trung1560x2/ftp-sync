@@ -19,6 +19,7 @@ interface TerminalTabBarProps {
   onNewTab: () => void;
   onUpdateTabColor?: (tabId: string, color: string | undefined) => void;
   onRenameTab?: (tabId: string, newTitle: string) => void;
+  onDuplicateTab?: (tabId: string) => void;
 }
 
 const TerminalTabBar: React.FC<TerminalTabBarProps> = ({
@@ -29,6 +30,7 @@ const TerminalTabBar: React.FC<TerminalTabBarProps> = ({
   onNewTab,
   onUpdateTabColor,
   onRenameTab,
+  onDuplicateTab,
 }) => {
   const tabsContainerRef = useRef<HTMLDivElement>(null);
   const [dragTabId, setDragTabId] = useState<string | null>(null);
@@ -151,10 +153,21 @@ const TerminalTabBar: React.FC<TerminalTabBarProps> = ({
               if (newTitle !== null) {
                 onRenameTab?.(contextMenu.tabId, newTitle.trim() || 'Terminal');
               }
+              setContextMenu(null);
             }}
             className="w-full text-left px-3 py-1.5 hover:bg-neutral-800 hover:text-white transition-colors"
           >
             Rename Tab...
+          </button>
+          
+          <button
+            onClick={() => {
+              onDuplicateTab?.(contextMenu.tabId);
+              setContextMenu(null);
+            }}
+            className="w-full text-left px-3 py-1.5 hover:bg-neutral-800 hover:text-white transition-colors"
+          >
+            Duplicate Connection
           </button>
           
           <div className="border-t border-neutral-800 my-1"></div>

@@ -774,4 +774,125 @@ router.post('/ssh-config/import', terminalUpload.single('file'), async (req: Req
   }
 });
 
+// Process List (Process Tree View)
+router.get('/sessions/:sessionId/processes', async (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  try {
+    const stdout = await sshTerminalService.execCommand(sessionId, 'ps axo pid,ppid,user,%cpu,%mem,comm --no-headers');
+    const lines = stdout.split('\n');
+    const processes = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const parts = trimmed.split(/\s+/);
+      if (parts.length < 6) continue;
+      const pid = parseInt(parts[0], 10);
+      const ppid = parseInt(parts[1], 10);
+      const user = parts[2];
+      const cpu = parseFloat(parts[3]);
+      const mem = parseFloat(parts[4]);
+      const name = parts.slice(5).join(' ');
+      processes.push({ pid, ppid, user, cpu, mem, name });
+    }
+    res.json({ success: true, processes });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/sessions/:sessionId/processes/kill', async (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  const { pid } = req.body;
+  if (!pid) {
+    res.status(400).json({ success: false, message: 'PID is required' });
+    return;
+  }
+  try {
+    await sshTerminalService.execCommand(sessionId, `kill -9 ${pid}`);
+    res.json({ success: true, message: `Process ${pid} killed successfully` });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Environment Variables Viewer & editor
+router.get('/sessions/:sessionId/env-vars', async (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  try {
+    const stdout = await sshTerminalService.execCommand(sessionId, 'printenv');
+    const lines = stdout.split('\n');
+    const envVars = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx === -1) continue;
+      const key = trimmed.substring(0, eqIdx);
+      const value = trimmed.substring(eqIdx + 1);
+      envVars.push({ key, value });
+    }
+    res.json({ success: true, envVars });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/sessions/:sessionId/env-vars', async (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  const { key, value } = req.body;
+  if (!key) {
+    res.status(400).json({ success: false, message: 'Key is required' });
+    return;
+  }
+  try {
+    const escapedVal = (value || '').replace(/"/g, '\\"');
+    // Save permanently in ~/.bashrc or ~/.profile
+    const cmd = `if [ -f ~/.bashrc ]; then if grep -q "export ${key}=" ~/.bashrc; then sed -i 's|export ${key}=.*|export ${key}="${escapedVal}"|' ~/.bashrc; else echo 'export ${key}="${escapedVal}"' >> ~/.bashrc; fi; else echo 'export ${key}="${escapedVal}"' >> ~/.profile; fi`;
+    await sshTerminalService.execCommand(sessionId, cmd);
+    res.json({ success: true, message: 'Environment variable saved' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.delete('/sessions/:sessionId/env-vars/:key', async (req: Request, res: Response) => {
+  const { sessionId, key } = req.params;
+  try {
+    const cmd = `if [ -f ~/.bashrc ]; then sed -i '/export ${key}=/d' ~/.bashrc; fi; if [ -f ~/.profile ]; then sed -i '/export ${key}=/d' ~/.profile; fi`;
+    await sshTerminalService.execCommand(sessionId, cmd);
+    res.json({ success: true, message: 'Environment variable deleted' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Uptime & Load History
+router.get('/sessions/:sessionId/uptime', async (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  try {
+    const stdout = await sshTerminalService.execCommand(sessionId, 'uptime');
+    const trimmed = stdout.trim();
+    const loadMatch = trimmed.match(/load average:\s*([0-9.]+),\s*([0-9.]+),\s*([0-9.]+)/i);
+    const loads = loadMatch ? [parseFloat(loadMatch[1]), parseFloat(loadMatch[2]), parseFloat(loadMatch[3])] : [0, 0, 0];
+    
+    let uptimeStr = '';
+    const upIndex = trimmed.indexOf('up');
+    if (upIndex !== -1) {
+      const commaIndex = trimmed.indexOf(',', upIndex);
+      if (commaIndex !== -1) {
+        const nextCommaIndex = trimmed.indexOf(',', commaIndex + 1);
+        if (nextCommaIndex !== -1 && trimmed.includes('day')) {
+          uptimeStr = trimmed.substring(upIndex + 2, nextCommaIndex).trim();
+        } else {
+          uptimeStr = trimmed.substring(upIndex + 2, commaIndex).trim();
+        }
+      }
+    }
+    if (!uptimeStr) uptimeStr = 'Unknown';
+    res.json({ success: true, uptime: uptimeStr, loadAverage: loads });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 export default router;
